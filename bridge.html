@@ -87,32 +87,83 @@ function average(list, field) {
 	return n ? sum / n : null;
 }
 
+function round(x, digits) {
+	return typeof x === "number" ? Number(x.toFixed(digits)) : x;
+}
+
+// every player loaded once stays in the browser storage (a few hundred bytes each), so it shows at once next time,
+// also after a game restart
+var STORE_PREFIX = "dlr_player_";
+var STORE_KEEP_MS = 60 * 24 * 3600 * 1000;
+
+function stored(acc) {
+	try {
+		var e = JSON.parse(localStorage.getItem(STORE_PREFIX + acc) || "null");
+		return e && Date.now() - e.at < STORE_KEEP_MS ? e : null;
+	} catch (x) {
+		return null;
+	}
+}
+
+function store(acc, e) {
+	e.at = Date.now();
+	try { localStorage.setItem(STORE_PREFIX + acc, JSON.stringify(e)); } catch (x) { }
+}
+
+// now and then drop players nobody looked at for a long time
+function prune() {
+	try {
+		for (var i = localStorage.length - 1; i >= 0; i--) {
+			var key = localStorage.key(i);
+			if (key && key.indexOf(STORE_PREFIX) === 0 && !stored(key.substring(STORE_PREFIX.length))) localStorage.removeItem(key);
+		}
+	} catch (x) { }
+}
+
 var jobs = {
 	// one player's profile: accuracy / headshot rate and total games / wins / last hits.
-	// deadlock-api's per-hero stats answer quickly; the full match history is exact but can take half a minute,
-	// so its totals replace the quick ones once it arrives.
+	// What this browser already knows goes out first. deadlock-api's per-hero stats answer quickly; the full match
+	// history is exact but can take half a minute, so its totals replace the quick ones once it arrives.
 	profile: function () {
 		var acc = P.get("acc");
+		var saved = stored(acc) || { t: null, full: 0, p: null };
+		var sent = {};
+		// a message that repeats what already went out is skipped
+		function give(msg) {
+			var text = JSON.stringify(msg);
+			if (sent[msg.k] === text) return;
+			sent[msg.k] = text;
+			send(msg, 0);
+		}
+		if (saved.t) give({ k: "t", d: saved.t, full: saved.full });
+		if (saved.p) give({ k: "p", d: saved.p });
+		if (!saved.t && !saved.p) send({ k: "hi" }, 0);
+		if (Math.random() < 0.05) prune();
 		var full = false;
 		var heroes = get("/v1/players/hero-stats?account_ids=" + acc + "&game_mode=normal").then(function (list) {
-			if (!full && list.length) {
+			// stored totals from the full history beat fresh quick ones
+			if (!full && !saved.full && list.length) {
 				var t = [0, 0, 0];
 				list.forEach(function (h) {
 					t[0] += h.matches_played || 0;
 					t[1] += h.wins || 0;
 					t[2] += Math.round((h.last_hits_per_min || 0) * (h.time_played || 0) / 60);
 				});
-				send({ k: "t", d: t, full: 0 }, 0);
+				saved.t = t;
+				store(acc, saved);
+				give({ k: "t", d: t, full: 0 });
 			}
 			return list;
 		}, function () { return []; });
 		var stats = Promise.all([heroes, metrics()]).then(function (r) {
 			var accuracy = average(r[0], "accuracy"), hs = average(r[0], "crit_shot_rate"), dist = r[1];
 			if (accuracy === null && hs === null) return;
-			send({ k: "p", d: {
-				acc: [accuracy, percentile(accuracy, dist && dist.accuracy)],
-				hs: [hs, percentile(hs, dist && dist.crit_shot_rate)]
-			} }, 0);
+			saved.p = {
+				acc: [round(accuracy, 4), round(percentile(accuracy, dist && dist.accuracy), 1)],
+				hs: [round(hs, 4), round(percentile(hs, dist && dist.crit_shot_rate), 1)]
+			};
+			store(acc, saved);
+			give({ k: "p", d: saved.p });
 		});
 		var history = get("/v1/players/" + acc + "/match-history").then(function (all) {
 			var t = [0, 0, 0];
@@ -123,13 +174,17 @@ var jobs = {
 				t[2] += m.last_hits || 0;
 			});
 			full = true;
-			send({ k: "t", d: t, full: 1 }, 0);
+			saved.t = t;
+			saved.full = 1;
+			store(acc, saved);
+			give({ k: "t", d: t, full: 1 });
 		}, function () { });
 		Promise.all([stats, history]).then(function () { send({ k: "done" }, 1); });
 	},
 
 	// rank badges of several players
 	ranks: function () {
+		send({ k: "hi" }, 0);
 		get("/v1/players/rank?account_ids=" + P.get("accs"))
 			.then(function (list) {
 				var out = {};
@@ -141,6 +196,5 @@ var jobs = {
 	}
 };
 
-send({ k: "hi" }, 0);
 (jobs[P.get("job")] || function () { send({ k: "e", e: "unknown job" }, 1); })();
 </script>
