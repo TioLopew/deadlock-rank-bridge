@@ -1,0 +1,91 @@
+<!doctype html><meta charset="utf-8"><title>Deadlock rank mod bridge</title><script>
+// Bridge page of the Deadlock rank mod, opened by the game in a hidden HTML panel (the game's HTML panels only open
+// http(s) pages, so it is hosted on GitHub Pages):
+//   bridge.html?job=<profile|ranks>&p=<title prefix>&q=<request id>&acc=<account>|accs=<accounts>
+// Data comes from deadlock-api; results go back to Panorama through document.title, one short message at a time.
+var P = new URLSearchParams(location.search);
+var PREFIX = P.get("p") || "", REQ = Number(P.get("q"));
+var MAX_MESSAGE = 1800;
+var queue = [], busy = false, seq = 0;
+
+function send(data, fin) {
+	queue.push([data, fin]);
+	if (!busy) next();
+}
+
+function next() {
+	var item = queue.shift();
+	if (!item) { busy = false; return; }
+	busy = true;
+	seq++;
+	document.title = PREFIX + JSON.stringify({ q: REQ, s: seq, f: item[1] ? 1 : 0, d: item[0] });
+	setTimeout(next, 250);
+}
+
+// splits {key: value} into messages of kind k that stay short enough for a page title
+function sendMap(k, map) {
+	var part = {}, size = 0;
+	Object.keys(map).forEach(function (key) {
+		var piece = JSON.stringify(map[key]).length + key.length + 4;
+		if (size + piece > MAX_MESSAGE && size) {
+			send({ k: k, d: part }, 0);
+			part = {};
+			size = 0;
+		}
+		part[key] = map[key];
+		size += piece;
+	});
+	if (size) send({ k: k, d: part }, 0);
+}
+
+var API = "https://api.deadlock-api.com";
+function get(path) {
+	return fetch(API + path).then(function (r) { return r.ok ? r.json() : Promise.reject("HTTP " + r.status); });
+}
+
+function won(m) { return m.player_team == m.match_result ? 1 : 0; }
+
+var jobs = {
+	// one player's match history: totals per hero and the latest matches
+	profile: function () {
+		get("/v1/players/" + P.get("acc") + "/match-history")
+			.then(function (all) {
+				// regular 6v6 games only: unranked, ranked and placement matches, newest first
+				var a = all.filter(function (m) { return m.game_mode == 1 && [1, 4, 8].indexOf(m.match_mode) >= 0; })
+					.sort(function (x, y) { return y.start_time - x.start_time; });
+				// per hero: [games, wins, ranked games, ranked wins, last hits, denies]
+				var heroes = {};
+				a.forEach(function (m) {
+					var e = heroes[m.hero_id] = heroes[m.hero_id] || [0, 0, 0, 0, 0, 0];
+					var ranked = m.match_mode == 4 ? 1 : 0;
+					e[0]++; e[1] += won(m); e[2] += ranked; e[3] += ranked && won(m); e[4] += m.last_hits; e[5] += m.denies;
+				});
+				sendMap("h", heroes);
+				// latest matches: [match id, hero, win, kills, deaths, assists, net worth, duration, start time, ranked]
+				var matches = {};
+				a.slice(0, 30).forEach(function (m, i) {
+					matches[i] = [m.match_id, m.hero_id, won(m), m.player_kills, m.player_deaths, m.player_assists,
+						m.net_worth, m.match_duration_s, m.start_time, m.match_mode == 4 ? 1 : 0];
+				});
+				sendMap("m", matches);
+				send({ k: "done", n: a.length }, 1);
+			})
+			.catch(function (e) { send({ k: "e", e: String(e) }, 1); });
+	},
+
+	// rank badges of several players
+	ranks: function () {
+		get("/v1/players/rank?account_ids=" + P.get("accs"))
+			.then(function (list) {
+				var out = {};
+				list.forEach(function (r) { out[r.account_id] = r.badge; });
+				sendMap("r", out);
+				send({ k: "done" }, 1);
+			})
+			.catch(function (e) { send({ k: "e", e: String(e) }, 1); });
+	}
+};
+
+send({ k: "hi" }, 0);
+(jobs[P.get("job")] || function () { send({ k: "e", e: "unknown job" }, 1); })();
+</script>
