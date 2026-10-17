@@ -45,10 +45,76 @@ function get(path) {
 
 function won(m) { return m.player_team == m.match_result ? 1 : 0; }
 
+var LATEST = 16;
+var METRICS_CACHE_MS = 6 * 3600 * 1000;
+
+// community distribution of per-player stats over their latest LATEST matches; cached by the browser for a few hours
+function metrics(mode) {
+	var key = "dlr_metrics_" + mode + "_" + LATEST;
+	try {
+		var c = JSON.parse(localStorage.getItem(key) || "null");
+		if (c && Date.now() - c.t < METRICS_CACHE_MS) return Promise.resolve(c.d);
+	} catch (e) { }
+	return get("/v1/analytics/player-stats/metrics?match_mode=" + mode + "&max_matches=" + LATEST).then(function (d) {
+		var keep = { accuracy: d.accuracy, crit_shot_rate: d.crit_shot_rate };
+		try { localStorage.setItem(key, JSON.stringify({ t: Date.now(), d: keep })); } catch (e) { }
+		return keep;
+	});
+}
+
+// percentile of value inside the thresholds percentile1..percentile99 (linear between them)
+function percentile(value, dist) {
+	var at = [1, 5, 10, 25, 50, 75, 90, 95, 99];
+	if (!dist || typeof value !== "number") return null;
+	var prev = null;
+	for (var i = 0; i < at.length; i++) {
+		var v = dist["percentile" + at[i]];
+		if (typeof v !== "number") return null;
+		if (value < v) {
+			if (prev === null) return at[0];
+			return prev[1] === v ? prev[0] : prev[0] + (at[i] - prev[0]) * (value - prev[1]) / (v - prev[1]);
+		}
+		prev = [at[i], v];
+	}
+	return at[at.length - 1];
+}
+
+// accuracy and headshot (crit) rate over the latest matches, with their community percentiles
+function perf(acc, latest) {
+	if (!latest.length) return Promise.resolve(null);
+	var ranked = latest.filter(function (m) { return m.match_mode == 4; }).length;
+	var mode = ranked * 2 >= latest.length ? "Ranked" : "Unranked";
+	var ids = latest.map(function (m) { return m.match_id; }).join(",");
+	var meta = get("/v1/matches/metadata?match_ids=" + ids + "&account_ids=" + acc + "&only_filtered_players=true" +
+		"&include_player_final_stats=true&include_info=false&limit=" + latest.length + "&format=json");
+	return Promise.all([meta, metrics(mode)]).then(function (r) {
+		var hit = 0, missed = 0, heroHit = 0, crit = 0, n = 0;
+		r[0].forEach(function (match) {
+			(match.players || []).forEach(function (p) {
+				var s = p.final_stats;
+				if (p.account_id != acc || !s) return;
+				n++;
+				hit += s.shots_hit || 0;
+				missed += s.shots_missed || 0;
+				heroHit += s.hero_bullets_hit || 0;
+				crit += s.hero_bullets_hit_crit || 0;
+			});
+		});
+		var accuracy = hit + missed ? hit / (hit + missed) : null;
+		var hs = heroHit + crit ? crit / (heroHit + crit) : null;
+		return {
+			acc: [accuracy, percentile(accuracy, r[1].accuracy)],
+			hs: [hs, percentile(hs, r[1].crit_shot_rate)],
+			n: n, md: mode == "Ranked" ? 1 : 0
+		};
+	});
+}
+
 var jobs = {
-	// one player's match history: totals per hero and the latest matches
+	// one player's profile: totals per hero, the latest matches, accuracy / headshot rate over those matches
 	profile: function () {
-		get("/v1/players/" + P.get("acc") + "/match-history")
+		var acc = P.get("acc");
+		get("/v1/players/" + acc + "/match-history")
 			.then(function (all) {
 				// regular 6v6 games only: unranked, ranked and placement matches, newest first
 				var a = all.filter(function (m) { return m.game_mode == 1 && [1, 4, 8].indexOf(m.match_mode) >= 0; })
@@ -62,13 +128,15 @@ var jobs = {
 				});
 				sendMap("h", heroes);
 				// latest matches: [match id, hero, win, kills, deaths, assists, net worth, duration, start time, ranked]
-				var matches = {};
-				a.slice(0, 30).forEach(function (m, i) {
+				var latest = a.slice(0, LATEST), matches = {};
+				latest.forEach(function (m, i) {
 					matches[i] = [m.match_id, m.hero_id, won(m), m.player_kills, m.player_deaths, m.player_assists,
 						m.net_worth, m.match_duration_s, m.start_time, m.match_mode == 4 ? 1 : 0];
 				});
 				sendMap("m", matches);
-				send({ k: "done", n: a.length }, 1);
+				return perf(acc, latest)
+					.then(function (p) { if (p) send({ k: "p", d: p }, 0); }, function () { })
+					.then(function () { send({ k: "done", n: a.length }, 1); });
 			})
 			.catch(function (e) { send({ k: "e", e: String(e) }, 1); });
 	},
