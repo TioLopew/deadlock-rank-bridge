@@ -43,22 +43,16 @@ function get(path) {
 	return fetch(API + path).then(function (r) { return r.ok ? r.json() : Promise.reject("HTTP " + r.status); });
 }
 
-var LATEST = 16;
 var METRICS_CACHE_MS = 6 * 3600 * 1000;
 
-// regular 6v6 games: unranked, ranked and placement matches (no bots, private lobbies or hero labs)
-function regularMode(mode) {
-	return mode === "Unranked" || mode === "Ranked" || /calibration/i.test(String(mode));
-}
-
-// community distribution of per-player stats over their latest LATEST matches; cached by the browser for a few hours
-function metrics(mode) {
-	var key = "dlr_metrics_" + mode + "_" + LATEST;
+// community distribution of the per-match stats of the last 30 days; cached by the browser for a few hours
+function metrics() {
+	var key = "dlr_metrics";
 	try {
 		var c = JSON.parse(localStorage.getItem(key) || "null");
 		if (c && Date.now() - c.t < METRICS_CACHE_MS) return Promise.resolve(c.d);
 	} catch (e) { }
-	return get("/v1/analytics/player-stats/metrics?match_mode=" + mode + "&max_matches=" + LATEST).then(function (d) {
+	return get("/v1/analytics/player-stats/metrics").then(function (d) {
 		var keep = { accuracy: d.accuracy, crit_shot_rate: d.crit_shot_rate };
 		try { localStorage.setItem(key, JSON.stringify({ t: Date.now(), d: keep })); } catch (e) { }
 		return keep;
@@ -82,57 +76,44 @@ function percentile(value, dist) {
 	return at[at.length - 1];
 }
 
-// accuracy and headshot (crit) rate over the latest regular matches, with their community percentiles
-// (against ranked players when most of those matches were ranked)
-function perf(acc) {
-	var meta = get("/v1/matches/metadata?account_ids=" + acc + "&game_mode=normal&only_filtered_players=true" +
-		"&include_player_final_stats=true&include_info=false&extra_match_columns=match_mode" +
-		"&order_by=start_time&order_direction=desc&limit=" + (LATEST + 8) + "&format=json");
-	return Promise.all([meta, metrics("Ranked"), metrics("Unranked")]).then(function (r) {
-		var latest = r[0].filter(function (m) { return regularMode(m.match_mode); }).slice(0, LATEST);
-		if (!latest.length) return null;
-		var ranked = latest.filter(function (m) { return m.match_mode === "Ranked"; }).length;
-		var dist = ranked * 2 >= latest.length ? r[1] : r[2];
-		var hit = 0, missed = 0, heroHit = 0, crit = 0, n = 0;
-		latest.forEach(function (match) {
-			(match.players || []).forEach(function (p) {
-				var s = p.final_stats;
-				if (p.account_id != acc || !s) return;
-				n++;
-				hit += s.shots_hit || 0;
-				missed += s.shots_missed || 0;
-				heroHit += s.hero_bullets_hit || 0;
-				crit += s.hero_bullets_hit_crit || 0;
-			});
-		});
-		var accuracy = hit + missed ? hit / (hit + missed) : null;
-		var hs = heroHit + crit ? crit / (heroHit + crit) : null;
-		return {
-			acc: [accuracy, percentile(accuracy, dist && dist.accuracy)],
-			hs: [hs, percentile(hs, dist && dist.crit_shot_rate)],
-			n: n, md: dist === r[1] ? 1 : 0
-		};
+// weighted average of a per-hero rate (weights: matches played on the hero)
+function average(list, field) {
+	var sum = 0, n = 0;
+	list.forEach(function (h) {
+		if (typeof h[field] !== "number" || !h.matches_played) return;
+		sum += h[field] * h.matches_played;
+		n += h.matches_played;
 	});
+	return n ? sum / n : null;
 }
 
 var jobs = {
-	// one player's profile: accuracy / headshot rate over the latest matches, and total games / wins / last hits.
-	// The full match history is exact but deadlock-api can take half a minute for it, so the stored per-hero stats
-	// give quick totals first and the match history replaces them once it arrives.
+	// one player's profile: accuracy / headshot rate and total games / wins / last hits.
+	// deadlock-api's per-hero stats answer quickly; the full match history is exact but can take half a minute,
+	// so its totals replace the quick ones once it arrives.
 	profile: function () {
 		var acc = P.get("acc");
 		var full = false;
-		var stats = perf(acc).then(function (p) { if (p) send({ k: "p", d: p }, 0); }, function () { });
-		var quick = get("/v1/players/hero-stats?account_ids=" + acc + "&game_mode=normal").then(function (list) {
-			if (full || !list.length) return;
-			var t = [0, 0, 0];
-			list.forEach(function (h) {
-				t[0] += h.matches_played || 0;
-				t[1] += h.wins || 0;
-				t[2] += Math.round((h.last_hits_per_min || 0) * (h.time_played || 0) / 60);
-			});
-			send({ k: "t", d: t, full: 0 }, 0);
-		}, function () { });
+		var heroes = get("/v1/players/hero-stats?account_ids=" + acc + "&game_mode=normal").then(function (list) {
+			if (!full && list.length) {
+				var t = [0, 0, 0];
+				list.forEach(function (h) {
+					t[0] += h.matches_played || 0;
+					t[1] += h.wins || 0;
+					t[2] += Math.round((h.last_hits_per_min || 0) * (h.time_played || 0) / 60);
+				});
+				send({ k: "t", d: t, full: 0 }, 0);
+			}
+			return list;
+		}, function () { return []; });
+		var stats = Promise.all([heroes, metrics()]).then(function (r) {
+			var accuracy = average(r[0], "accuracy"), hs = average(r[0], "crit_shot_rate"), dist = r[1];
+			if (accuracy === null && hs === null) return;
+			send({ k: "p", d: {
+				acc: [accuracy, percentile(accuracy, dist && dist.accuracy)],
+				hs: [hs, percentile(hs, dist && dist.crit_shot_rate)]
+			} }, 0);
+		});
 		var history = get("/v1/players/" + acc + "/match-history").then(function (all) {
 			var t = [0, 0, 0];
 			all.forEach(function (m) {
@@ -144,7 +125,7 @@ var jobs = {
 			full = true;
 			send({ k: "t", d: t, full: 1 }, 0);
 		}, function () { });
-		Promise.all([stats, quick, history]).then(function () { send({ k: "done" }, 1); });
+		Promise.all([stats, history]).then(function () { send({ k: "done" }, 1); });
 	},
 
 	// rank badges of several players
