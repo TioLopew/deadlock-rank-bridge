@@ -110,12 +110,18 @@ function store(acc, e) {
 	try { localStorage.setItem(STORE_PREFIX + acc, JSON.stringify(e)); } catch (x) { }
 }
 
-// now and then drop players nobody looked at for a long time
+// now and then drop players and badges nobody looked at for a long time
 function prune() {
 	try {
 		for (var i = localStorage.length - 1; i >= 0; i--) {
-			var key = localStorage.key(i);
-			if (key && key.indexOf(STORE_PREFIX) === 0 && !stored(key.substring(STORE_PREFIX.length))) localStorage.removeItem(key);
+			var key = localStorage.key(i), old = false;
+			if (!key) continue;
+			if (key.indexOf(STORE_PREFIX) === 0) old = !stored(key.substring(STORE_PREFIX.length));
+			if (key.indexOf("dlr_badge_") === 0) {
+				var e = JSON.parse(localStorage.getItem(key) || "null");
+				old = !e || Date.now() - e[1] > STORE_KEEP_MS;
+			}
+			if (old) localStorage.removeItem(key);
 		}
 	} catch (x) { }
 }
@@ -183,13 +189,28 @@ var jobs = {
 	},
 
 	// rank badges of several players
+	// badges (tier * 10 + subrank, 0 = no rank) are kept in the browser storage too: those known go out first
 	ranks: function () {
-		send({ k: "hi" }, 0);
-		get("/v1/players/rank?account_ids=" + P.get("accs"))
+		var accs = String(P.get("accs") || "").split(",").filter(function (a) { return /^\d+$/.test(a); });
+		var known = {};
+		accs.forEach(function (a) {
+			try {
+				var e = JSON.parse(localStorage.getItem("dlr_badge_" + a) || "null");
+				if (e && Date.now() - e[1] < STORE_KEEP_MS) known[a] = e[0];
+			} catch (x) { }
+		});
+		if (Math.random() < 0.05) prune();
+		if (Object.keys(known).length) sendMap("r", known);
+		else send({ k: "hi" }, 0);
+		get("/v1/players/rank?account_ids=" + accs.join(","))
 			.then(function (list) {
-				var out = {};
-				list.forEach(function (r) { out[r.account_id] = r.badge; });
-				sendMap("r", out);
+				var fresh = {};
+				list.forEach(function (r) {
+					var badge = typeof r.badge === "number" ? r.badge : 0;
+					try { localStorage.setItem("dlr_badge_" + r.account_id, JSON.stringify([badge, Date.now()])); } catch (x) { }
+					if (known[r.account_id] !== badge) fresh[r.account_id] = badge;
+				});
+				sendMap("r", fresh);
 				send({ k: "done" }, 1);
 			})
 			.catch(function (e) { send({ k: "e", e: String(e) }, 1); });
