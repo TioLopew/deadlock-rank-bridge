@@ -43,10 +43,13 @@ function get(path) {
 	return fetch(API + path).then(function (r) { return r.ok ? r.json() : Promise.reject("HTTP " + r.status); });
 }
 
-function won(m) { return m.player_team == m.match_result ? 1 : 0; }
-
 var LATEST = 16;
 var METRICS_CACHE_MS = 6 * 3600 * 1000;
+
+// regular 6v6 games: unranked, ranked and placement matches (no bots, private lobbies or hero labs)
+function regularMode(mode) {
+	return mode === "Unranked" || mode === "Ranked" || /calibration/i.test(String(mode));
+}
 
 // community distribution of per-player stats over their latest LATEST matches; cached by the browser for a few hours
 function metrics(mode) {
@@ -59,7 +62,7 @@ function metrics(mode) {
 		var keep = { accuracy: d.accuracy, crit_shot_rate: d.crit_shot_rate };
 		try { localStorage.setItem(key, JSON.stringify({ t: Date.now(), d: keep })); } catch (e) { }
 		return keep;
-	});
+	}, function () { return null; });
 }
 
 // percentile of value inside the thresholds percentile1..percentile99 (linear between them)
@@ -79,17 +82,19 @@ function percentile(value, dist) {
 	return at[at.length - 1];
 }
 
-// accuracy and headshot (crit) rate over the latest matches, with their community percentiles
-function perf(acc, latest) {
-	if (!latest.length) return Promise.resolve(null);
-	var ranked = latest.filter(function (m) { return m.match_mode == 4; }).length;
-	var mode = ranked * 2 >= latest.length ? "Ranked" : "Unranked";
-	var ids = latest.map(function (m) { return m.match_id; }).join(",");
-	var meta = get("/v1/matches/metadata?match_ids=" + ids + "&account_ids=" + acc + "&only_filtered_players=true" +
-		"&include_player_final_stats=true&include_info=false&limit=" + latest.length + "&format=json");
-	return Promise.all([meta, metrics(mode)]).then(function (r) {
+// accuracy and headshot (crit) rate over the latest regular matches, with their community percentiles
+// (against ranked players when most of those matches were ranked)
+function perf(acc) {
+	var meta = get("/v1/matches/metadata?account_ids=" + acc + "&game_mode=normal&only_filtered_players=true" +
+		"&include_player_final_stats=true&include_info=false&extra_match_columns=match_mode" +
+		"&order_by=start_time&order_direction=desc&limit=" + (LATEST + 8) + "&format=json");
+	return Promise.all([meta, metrics("Ranked"), metrics("Unranked")]).then(function (r) {
+		var latest = r[0].filter(function (m) { return regularMode(m.match_mode); }).slice(0, LATEST);
+		if (!latest.length) return null;
+		var ranked = latest.filter(function (m) { return m.match_mode === "Ranked"; }).length;
+		var dist = ranked * 2 >= latest.length ? r[1] : r[2];
 		var hit = 0, missed = 0, heroHit = 0, crit = 0, n = 0;
-		r[0].forEach(function (match) {
+		latest.forEach(function (match) {
 			(match.players || []).forEach(function (p) {
 				var s = p.final_stats;
 				if (p.account_id != acc || !s) return;
@@ -103,42 +108,43 @@ function perf(acc, latest) {
 		var accuracy = hit + missed ? hit / (hit + missed) : null;
 		var hs = heroHit + crit ? crit / (heroHit + crit) : null;
 		return {
-			acc: [accuracy, percentile(accuracy, r[1].accuracy)],
-			hs: [hs, percentile(hs, r[1].crit_shot_rate)],
-			n: n, md: mode == "Ranked" ? 1 : 0
+			acc: [accuracy, percentile(accuracy, dist && dist.accuracy)],
+			hs: [hs, percentile(hs, dist && dist.crit_shot_rate)],
+			n: n, md: dist === r[1] ? 1 : 0
 		};
 	});
 }
 
 var jobs = {
-	// one player's profile: totals per hero, the latest matches, accuracy / headshot rate over those matches
+	// one player's profile: accuracy / headshot rate over the latest matches, and total games / wins / last hits.
+	// The full match history is exact but deadlock-api can take half a minute for it, so the stored per-hero stats
+	// give quick totals first and the match history replaces them once it arrives.
 	profile: function () {
 		var acc = P.get("acc");
-		get("/v1/players/" + acc + "/match-history")
-			.then(function (all) {
-				// regular 6v6 games only: unranked, ranked and placement matches, newest first
-				var a = all.filter(function (m) { return m.game_mode == 1 && [1, 4, 8].indexOf(m.match_mode) >= 0; })
-					.sort(function (x, y) { return y.start_time - x.start_time; });
-				// per hero: [games, wins, ranked games, ranked wins, last hits, denies]
-				var heroes = {};
-				a.forEach(function (m) {
-					var e = heroes[m.hero_id] = heroes[m.hero_id] || [0, 0, 0, 0, 0, 0];
-					var ranked = m.match_mode == 4 ? 1 : 0;
-					e[0]++; e[1] += won(m); e[2] += ranked; e[3] += ranked && won(m); e[4] += m.last_hits; e[5] += m.denies;
-				});
-				sendMap("h", heroes);
-				// latest matches: [match id, hero, win, kills, deaths, assists, net worth, duration, start time, ranked]
-				var latest = a.slice(0, LATEST), matches = {};
-				latest.forEach(function (m, i) {
-					matches[i] = [m.match_id, m.hero_id, won(m), m.player_kills, m.player_deaths, m.player_assists,
-						m.net_worth, m.match_duration_s, m.start_time, m.match_mode == 4 ? 1 : 0];
-				});
-				sendMap("m", matches);
-				return perf(acc, latest)
-					.then(function (p) { if (p) send({ k: "p", d: p }, 0); }, function () { })
-					.then(function () { send({ k: "done", n: a.length }, 1); });
-			})
-			.catch(function (e) { send({ k: "e", e: String(e) }, 1); });
+		var full = false;
+		var stats = perf(acc).then(function (p) { if (p) send({ k: "p", d: p }, 0); }, function () { });
+		var quick = get("/v1/players/hero-stats?account_ids=" + acc + "&game_mode=normal").then(function (list) {
+			if (full || !list.length) return;
+			var t = [0, 0, 0];
+			list.forEach(function (h) {
+				t[0] += h.matches_played || 0;
+				t[1] += h.wins || 0;
+				t[2] += Math.round((h.last_hits_per_min || 0) * (h.time_played || 0) / 60);
+			});
+			send({ k: "t", d: t, full: 0 }, 0);
+		}, function () { });
+		var history = get("/v1/players/" + acc + "/match-history").then(function (all) {
+			var t = [0, 0, 0];
+			all.forEach(function (m) {
+				if (m.game_mode != 1 || [1, 4, 8].indexOf(m.match_mode) < 0) return;
+				t[0]++;
+				t[1] += m.player_team == m.match_result ? 1 : 0;
+				t[2] += m.last_hits || 0;
+			});
+			full = true;
+			send({ k: "t", d: t, full: 1 }, 0);
+		}, function () { });
+		Promise.all([stats, quick, history]).then(function () { send({ k: "done" }, 1); });
 	},
 
 	// rank badges of several players
