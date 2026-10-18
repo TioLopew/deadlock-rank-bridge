@@ -120,20 +120,45 @@ function store(acc, e) {
 	try { localStorage.setItem(STORE_PREFIX + acc, JSON.stringify(e)); } catch (x) { }
 }
 
+// rank badges (tier * 10 + subrank, 0 = no rank) are kept the same way: account -> [badge, time looked up]
+var BADGE_PREFIX = "dlr_badge_";
+
+function storedBadge(acc) {
+	try {
+		var e = JSON.parse(localStorage.getItem(BADGE_PREFIX + acc) || "null");
+		return e && Date.now() - e[1] < STORE_KEEP_MS ? e : null;
+	} catch (x) {
+		return null;
+	}
+}
+
+function storeBadge(acc, badge) {
+	try { localStorage.setItem(BADGE_PREFIX + acc, JSON.stringify([badge, Date.now()])); } catch (x) { }
+}
+
+// every key of the browser storage that starts with prefix, without the prefix
+function storedKeys(prefix) {
+	var out = [];
+	try {
+		for (var i = 0; i < localStorage.length; i++) {
+			var key = localStorage.key(i);
+			if (key && key.indexOf(prefix) === 0) out.push(key.substring(prefix.length));
+		}
+	} catch (x) { }
+	return out;
+}
+
 // now and then drop players and badges nobody looked at for a long time
 function prune() {
 	try {
-		for (var i = localStorage.length - 1; i >= 0; i--) {
-			var key = localStorage.key(i), old = false;
-			if (!key) continue;
-			if (key.indexOf(STORE_PREFIX) === 0) old = !stored(key.substring(STORE_PREFIX.length));
-			if (key.indexOf("dlr_badge_") === 0) {
-				var e = JSON.parse(localStorage.getItem(key) || "null");
-				old = !e || Date.now() - e[1] > STORE_KEEP_MS;
-			}
-			if (old) localStorage.removeItem(key);
-		}
+		storedKeys(STORE_PREFIX).forEach(function (acc) { if (!stored(acc)) localStorage.removeItem(STORE_PREFIX + acc); });
+		storedKeys(BADGE_PREFIX).forEach(function (acc) { if (!storedBadge(acc)) localStorage.removeItem(BADGE_PREFIX + acc); });
 	} catch (x) { }
+}
+
+// the job's list of accounts ("accs")
+function accounts(job) {
+	return String(job.P.get("accs") || "").split(",").filter(function (a) { return /^\d+$/.test(a); });
 }
 
 // looks the badges of accs up on deadlock-api, keeps them and sends those that differ from known; ends the job
@@ -143,7 +168,7 @@ function freshRanks(job, accs, known) {
 			var fresh = {};
 			list.forEach(function (r) {
 				var badge = typeof r.badge === "number" ? r.badge : 0;
-				try { localStorage.setItem("dlr_badge_" + r.account_id, JSON.stringify([badge, Date.now()])); } catch (x) { }
+				storeBadge(r.account_id, badge);
 				if (known[r.account_id] !== badge) fresh[r.account_id] = badge;
 			});
 			job.sendMap("r", fresh, 1);
@@ -213,16 +238,12 @@ var jobs = {
 		Promise.all([stats, history]).then(function () { job.send({ k: "done" }, 1); });
 	},
 
-	// rank badges of several players
-	// badges (tier * 10 + subrank, 0 = no rank) are kept in the browser storage too: those known go out first
+	// rank badges of several players: those this browser keeps go out first, then the ones that changed
 	ranks: function (job) {
-		var accs = String(job.P.get("accs") || "").split(",").filter(function (a) { return /^\d+$/.test(a); });
-		var known = {};
+		var accs = accounts(job), known = {};
 		accs.forEach(function (a) {
-			try {
-				var e = JSON.parse(localStorage.getItem("dlr_badge_" + a) || "null");
-				if (e && Date.now() - e[1] < STORE_KEEP_MS) known[a] = e[0];
-			} catch (x) { }
+			var e = storedBadge(a);
+			if (e) known[a] = e[0];
 		});
 		if (Math.random() < 0.05) prune();
 		if (Object.keys(known).length) job.sendMap("r", known, 0);
@@ -233,16 +254,11 @@ var jobs = {
 	// every badge this browser keeps, most recently seen first, as "account:badge:age in minutes" lists: a screen
 	// of the game that just came up knows all of them at once. Accounts in accs are looked up fresh as well.
 	allbadges: function (job) {
-		var now = Date.now(), items = [];
-		var accs = String(job.P.get("accs") || "").split(",").filter(function (a) { return /^\d+$/.test(a); });
-		try {
-			for (var i = 0; i < localStorage.length; i++) {
-				var key = localStorage.key(i);
-				if (!key || key.indexOf("dlr_badge_") !== 0) continue;
-				var e = JSON.parse(localStorage.getItem(key) || "null");
-				if (e && now - e[1] < STORE_KEEP_MS) items.push([key.substring(10), e[0], now - e[1]]);
-			}
-		} catch (x) { }
+		var now = Date.now(), items = [], accs = accounts(job);
+		storedKeys(BADGE_PREFIX).forEach(function (acc) {
+			var e = storedBadge(acc);
+			if (e) items.push([acc, e[0], now - e[1]]);
+		});
 		items.sort(function (a, b) { return a[2] - b[2]; });
 		var parts = [], cur = "", known = {};
 		items.forEach(function (it) {
