@@ -136,6 +136,21 @@ function prune() {
 	} catch (x) { }
 }
 
+// looks the badges of accs up on deadlock-api, keeps them and sends those that differ from known; ends the job
+function freshRanks(job, accs, known) {
+	get("/v1/players/rank?account_ids=" + accs.join(","))
+		.then(function (list) {
+			var fresh = {};
+			list.forEach(function (r) {
+				var badge = typeof r.badge === "number" ? r.badge : 0;
+				try { localStorage.setItem("dlr_badge_" + r.account_id, JSON.stringify([badge, Date.now()])); } catch (x) { }
+				if (known[r.account_id] !== badge) fresh[r.account_id] = badge;
+			});
+			job.sendMap("r", fresh, 1);
+		})
+		.catch(function (e) { job.send({ k: "e", e: String(e) }, 1); });
+}
+
 var jobs = {
 	// one player's profile: accuracy / headshot rate and total games / wins / last hits.
 	// What this browser already knows goes out first. deadlock-api's per-hero stats answer quickly; the full match
@@ -212,17 +227,38 @@ var jobs = {
 		if (Math.random() < 0.05) prune();
 		if (Object.keys(known).length) job.sendMap("r", known, 0);
 		else job.send({ k: "hi" }, 0);
-		get("/v1/players/rank?account_ids=" + accs.join(","))
-			.then(function (list) {
-				var fresh = {};
-				list.forEach(function (r) {
-					var badge = typeof r.badge === "number" ? r.badge : 0;
-					try { localStorage.setItem("dlr_badge_" + r.account_id, JSON.stringify([badge, Date.now()])); } catch (x) { }
-					if (known[r.account_id] !== badge) fresh[r.account_id] = badge;
-				});
-				job.sendMap("r", fresh, 1);
-			})
-			.catch(function (e) { job.send({ k: "e", e: String(e) }, 1); });
+		freshRanks(job, accs, known);
+	},
+
+	// every badge this browser keeps, most recently seen first, as "account:badge:age in minutes" lists: a screen
+	// of the game that just came up knows all of them at once. Accounts in accs are looked up fresh as well.
+	allbadges: function (job) {
+		var now = Date.now(), items = [];
+		var accs = String(job.P.get("accs") || "").split(",").filter(function (a) { return /^\d+$/.test(a); });
+		try {
+			for (var i = 0; i < localStorage.length; i++) {
+				var key = localStorage.key(i);
+				if (!key || key.indexOf("dlr_badge_") !== 0) continue;
+				var e = JSON.parse(localStorage.getItem(key) || "null");
+				if (e && now - e[1] < STORE_KEEP_MS) items.push([key.substring(10), e[0], now - e[1]]);
+			}
+		} catch (x) { }
+		items.sort(function (a, b) { return a[2] - b[2]; });
+		var parts = [], cur = "", known = {};
+		items.forEach(function (it) {
+			known[it[0]] = it[1];
+			var text = it[0] + ":" + it[1] + ":" + Math.floor(it[2] / 60000);
+			if (cur && cur.length + text.length + 1 > MAX_MESSAGE) {
+				parts.push(cur);
+				cur = "";
+			}
+			cur += (cur ? "," : "") + text;
+		});
+		if (cur) parts.push(cur);
+		var last = accs.length ? -1 : parts.length - 1;
+		parts.forEach(function (d, i) { job.send({ k: "b", d: d }, i === last ? 1 : 0); });
+		if (accs.length) freshRanks(job, accs, known);
+		else if (!parts.length) job.send({ k: "done" }, 1);
 	}
 };
 
