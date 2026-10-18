@@ -252,12 +252,13 @@ var jobs = {
 	},
 
 	// every badge this browser keeps, most recently seen first, as "account:badge:age in minutes" lists: a screen
-	// of the game that just came up knows all of them at once. Accounts in accs are looked up fresh as well.
+	// of the game that just came up knows all of them at once. With since (a time), only the badges looked up from
+	// then on: a screen catching up with what other screens looked up meanwhile. Accounts in accs are looked up fresh.
 	allbadges: function (job) {
-		var now = Date.now(), items = [], accs = accounts(job);
+		var now = Date.now(), items = [], accs = accounts(job), since = Number(job.P.get("since")) || 0;
 		storedKeys(BADGE_PREFIX).forEach(function (acc) {
 			var e = storedBadge(acc);
-			if (e) items.push([acc, e[0], now - e[1]]);
+			if (e && e[1] >= since) items.push([acc, e[0], now - e[1]]);
 		});
 		items.sort(function (a, b) { return a[2] - b[2]; });
 		var parts = [], cur = "", known = {};
