@@ -168,11 +168,13 @@ var ACCENT = "#3fbf7f", MUTED = "#c4c9d0";
 function draw(sc, labels, note) {
 	var W = Math.max(240, window.innerWidth || 400), H = Math.max(180, window.innerHeight || 260), r2 = DLRPage.r2;
 	// labels sit just outside the corners, the name over its value: the radius leaves room for the widest name at
-	// the side corners and for two lines at the top and bottom ones
-	var widest = Math.max.apply(null, labels.map(function (l) { return String(l || "").length; })) * 7.4 + 6;
-	var bottomRoom = note ? 16 : 4;
-	var cx = W / 2, cy = (H - bottomRoom) / 2 + 6;
-	var R = Math.max(40, Math.min((W / 2 - widest - 6) / 0.97, ((H - bottomRoom) / 2 - 34) / 1.12));
+	// the side corners and for two lines at the top and bottom ones. The shape takes only RADAR_SHARE of that room:
+	// a compact radar with big, readable labels.
+	var RADAR_SHARE = 0.7;
+	var widest = Math.max.apply(null, labels.map(function (l) { return String(l || "").length; })) * 8.6 + 6;
+	var bottomRoom = note ? 18 : 4;
+	var cx = W / 2, cy = (H - bottomRoom) / 2 + 8;
+	var R = Math.max(34, RADAR_SHARE * Math.min((W / 2 - widest - 6) / 0.97, ((H - bottomRoom) / 2 - 40) / 1.12));
 	function pt(i, share) {
 		var a = -Math.PI / 2 + i * Math.PI / 3;
 		return [cx + Math.cos(a) * R * share, cy + Math.sin(a) * R * share];
@@ -197,14 +199,14 @@ function draw(sc, labels, note) {
 	sc.forEach(function (v, i) {
 		var p = pt(i, 1.12), anchor = Math.abs(p[0] - cx) < 4 ? "middle" : p[0] < cx ? "end" : "start";
 		// top corner: both lines above it; bottom corner: below it; side corners: centred on it
-		var y1 = p[1] < cy - R * 0.5 ? p[1] - 20 : p[1] > cy + R * 0.5 ? p[1] + 12 : p[1] - 4;
+		var y1 = p[1] < cy - R * 0.5 ? p[1] - 24 : p[1] > cy + R * 0.5 ? p[1] + 15 : p[1] - 5;
 		var lit = v !== null && best !== null && best - v < 0.5;
-		s.push('<text x="' + r2(p[0]) + '" y="' + r2(y1) + '" text-anchor="' + anchor + '" font-size="11" font-weight="800" letter-spacing="0.5" fill="' + (lit ? "#7ee2a8" : "#fff") + '">' +
+		s.push('<text x="' + r2(p[0]) + '" y="' + r2(y1) + '" text-anchor="' + anchor + '" font-size="13" font-weight="800" letter-spacing="0.5" fill="' + (lit ? "#7ee2a8" : "#fff") + '">' +
 			DLRPage.esc((labels[i] || "").toUpperCase()) + "</text>");
-		s.push('<text x="' + r2(p[0]) + '" y="' + r2(y1 + 15) + '" text-anchor="' + anchor + '" font-size="13" font-weight="800" fill="' + (lit ? "#7ee2a8" : MUTED) + '">' +
+		s.push('<text x="' + r2(p[0]) + '" y="' + r2(y1 + 18) + '" text-anchor="' + anchor + '" font-size="16" font-weight="800" fill="' + (lit ? "#7ee2a8" : MUTED) + '">' +
 			(v === null ? "—" : Math.round(v)) + "</text>");
 	});
-	if (note) s.push('<text x="' + r2(cx) + '" y="' + (H - 4) + '" text-anchor="middle" font-size="11" font-weight="700" fill="' + MUTED + '">' + DLRPage.esc(note) + "</text>");
+	if (note) s.push('<text x="' + r2(cx) + '" y="' + (H - 4) + '" text-anchor="middle" font-size="12" font-weight="700" fill="' + MUTED + '">' + DLRPage.esc(note) + "</text>");
 	s.push("</svg>");
 	document.body.innerHTML = s.join("");
 }
