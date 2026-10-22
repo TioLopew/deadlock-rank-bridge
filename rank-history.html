@@ -1,0 +1,134 @@
+<!doctype html><meta charset="utf-8"><title>Deadlock rank mod: rank history</title>
+<style>
+html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #000; color: #fff; font-family: Radiance, "Segoe UI", sans-serif; }
+svg { display: block; }
+</style>
+<body>
+<script src="shared.js?v=1"></script>
+<script>
+// Rank history chart of the profile page: rank-history.html#acc=<account>&p=<title prefix>&q=<request id>
+//   &n=<the 12 tier names, in the game's language>&pl=<"points" in the game's language>
+// The whole ranked history, one point per match; the line follows the rank points, not only the badges.
+var token = 0;
+
+// ranked points and the rank now: what the bridge page keeps, else a small load of our own
+function load(acc) {
+	var h = DLRPage.read("dlr_rh_" + acc), player = DLRPage.read("dlr_player_" + acc);
+	if (h) return Promise.resolve({ points: h.p, last: player && player.g });
+	var last = DLRPage.get("/v1/players/" + acc + "/rank").then(function (r) {
+		return r && typeof r.badge === "number" ? [r.badge, r.last_match ? r.last_match.player_rank_final_flat_progress : null] : null;
+	}, function () { return null; });
+	// /mmr-history is small but has no gains per match: the line then sits mid-subrank
+	var points = DLRPage.get("/v1/players/" + acc + "/mmr-history").then(function (rows) {
+		var seen = {}, out = [];
+		rows.forEach(function (r) {
+			if (!(r.rank > 0) || !r.start_time || seen[r.match_id]) return;
+			seen[r.match_id] = 1;
+			out.push([r.start_time, r.rank, 0]);
+		});
+		if (!out.length) return Promise.reject("empty");
+		return { points: out.sort(function (a, b) { return a[0] - b[0]; }), exact: false };
+	}).catch(function () {
+		return DLRPage.get("/v1/players/" + acc + "/match-history").then(function (all) {
+			var seen = {}, out = [];
+			all.forEach(function (m) {
+				if (m.match_mode != 4 || !(m.ranked_display_badge > 0) || !m.start_time || seen[m.match_id]) return;
+				seen[m.match_id] = 1;
+				out.push([m.start_time, m.ranked_display_badge, typeof m.ranked_delta === "number" ? m.ranked_delta : 0]);
+			});
+			return { points: out.sort(function (a, b) { return a[0] - b[0]; }), exact: true };
+		});
+	});
+	return Promise.all([points, last]).then(function (r) {
+		return { points: r[0].points, last: r[0].exact ? r[1] : null, now: r[1] };
+	});
+}
+
+function date(t) {
+	var d = new Date(t * 1000);
+	return ("0" + d.getDate()).slice(-2) + "." + ("0" + (d.getMonth() + 1)).slice(-2) + "." + String(d.getFullYear()).slice(-2);
+}
+
+// points beyond this many are thinned out for the line (every one still counts for the range); the last one stays
+var MAX_LINE_POINTS = 400;
+var ACCENT = "#3fbf7f", MUTED = "#c4c9d0";
+
+function draw(series, now, names, pointsWord) {
+	var W = Math.max(320, window.innerWidth || 1000), H = Math.max(90, window.innerHeight || 170);
+	var left = Math.round(W * 0.13), right = Math.round(W * 0.17), top = 10, bottom = 22;
+	var plotW = W - left - right, plotH = H - top - bottom, plotBottom = top + plotH;
+	var vals = series.map(function (p) { return p[1]; });
+	var lowTier = Math.max(1, Math.floor(Math.min.apply(null, vals) / 6) + 1);
+	var highTier = Math.min(DLRPage.MAX_TIER, Math.floor(Math.max.apply(null, vals) / 6) + 1);
+	var lo = (lowTier - 1) * 6, hi = highTier * 6;
+	function y(v) { return top + plotH - (v - lo) / (hi - lo) * plotH; }
+	var line = series;
+	if (series.length > MAX_LINE_POINTS) {
+		var step = series.length / MAX_LINE_POINTS;
+		line = [];
+		for (var k = 0; k < MAX_LINE_POINTS - 1; k++) line.push(series[Math.floor(k * step)]);
+		line.push(series[series.length - 1]);
+	}
+	var pad = 10, n = line.length;
+	var xs = line.map(function (_, i) { return n === 1 ? left + plotW / 2 : left + pad + i / (n - 1) * (plotW - 2 * pad); });
+	var ys = line.map(function (p) { return y(p[1]); });
+	var r2 = DLRPage.r2, bandH = plotH / (highTier - lowTier + 1);
+	var s = ['<svg xmlns="http://www.w3.org/2000/svg" width="' + W + '" height="' + H + '" font-family="Radiance, Segoe UI, sans-serif">',
+		'<defs><linearGradient id="a" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="' + ACCENT + '" stop-opacity="0.25"/><stop offset="1" stop-color="' + ACCENT + '" stop-opacity="0"/></linearGradient></defs>'];
+	for (var t = lowTier; t <= highTier; t++) {
+		var bandTop = y(t * 6), mid = bandTop + bandH / 2;
+		if ((t - lowTier) % 2 === 0) s.push('<rect x="' + left + '" y="' + r2(bandTop) + '" width="' + plotW + '" height="' + r2(bandH) + '" fill="#fff" fill-opacity="0.04"/>');
+		if (t > lowTier) s.push('<line x1="' + left + '" x2="' + (left + plotW) + '" y1="' + r2(bandTop + bandH) + '" y2="' + r2(bandTop + bandH) + '" stroke="#fff" stroke-opacity="0.14"/>');
+		var icon = Math.min(26, bandH - 2);
+		if (icon >= 10) s.push('<image href="ranks/tier' + ("0" + t).slice(-2) + '.webp" x="6" y="' + r2(mid - icon / 2) + '" width="' + r2(icon) + '" height="' + r2(icon) + '"/>');
+		if (bandH >= 13) s.push('<text x="38" y="' + r2(mid + 4.5) + '" fill="' + DLRPage.lift(DLRPage.COLORS[t]) + '" font-size="12" font-weight="800" letter-spacing="1">' + DLRPage.esc((names[t] || "").toUpperCase()) + "</text>");
+	}
+	s.push('<line x1="' + left + '" x2="' + (left + plotW) + '" y1="' + plotBottom + '" y2="' + plotBottom + '" stroke="#fff" stroke-opacity="0.22"/>');
+	var path = DLRPage.monotonePath(xs, ys);
+	if (n > 1) s.push('<path d="' + path + " L" + r2(xs[n - 1]) + "," + plotBottom + " L" + r2(xs[0]) + "," + plotBottom + ' Z" fill="url(#a)"/>');
+	s.push('<path d="' + path + '" fill="none" stroke="' + ACCENT + '" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>');
+	if (n <= 40) for (var i = 0; i < n - 1; i++) s.push('<circle cx="' + r2(xs[i]) + '" cy="' + r2(ys[i]) + '" r="2.5" fill="#000" stroke="' + ACCENT + '" stroke-width="1.5"/>');
+	s.push('<circle cx="' + r2(xs[n - 1]) + '" cy="' + r2(ys[n - 1]) + '" r="9" fill="' + ACCENT + '" fill-opacity="0.2"/><circle cx="' + r2(xs[n - 1]) + '" cy="' + r2(ys[n - 1]) + '" r="5" fill="' + ACCENT + '"/>');
+	var labels = [0, n - 1];
+	if (n >= 4) labels.push(Math.round((n - 1) / 3), Math.round((n - 1) * 2 / 3));
+	labels.filter(function (v, i, a) { return a.indexOf(v) === i; }).forEach(function (i) {
+		var anchor = n === 1 ? "middle" : i === 0 ? "start" : i === n - 1 ? "end" : "middle";
+		s.push('<text x="' + r2(xs[i]) + '" y="' + (H - 6) + '" fill="' + MUTED + '" font-size="12" font-weight="700" text-anchor="' + anchor + '">' + date(line[i][0]) + "</text>");
+	});
+	// the rank now: badge icon, name and subrank, points of the subrank
+	var badge = now && now[0] > 0 ? now[0] : series[series.length - 1][2], ts = DLRPage.split(badge);
+	if (ts) {
+		var cx = left + plotW + 14, cy = top + plotH / 2;
+		s.push('<image href="ranks/tier' + ("0" + ts[0]).slice(-2) + '.webp" x="' + cx + '" y="' + r2(cy - 34) + '" width="34" height="34"/>');
+		s.push('<text x="' + (cx + 40) + '" y="' + r2(cy - 11) + '" fill="' + DLRPage.lift(DLRPage.COLORS[ts[0]]) + '" font-size="16" font-weight="800">' +
+			DLRPage.esc((names[ts[0]] || "") + " " + DLRPage.ROMAN[ts[1]]) + "</text>");
+		var pr = now ? DLRPage.progress(now[0], now[1]) : null;
+		if (pr) s.push('<text x="' + cx + '" y="' + r2(cy + 18) + '" fill="' + MUTED + '" font-size="13" font-weight="700">' + DLRPage.esc(pointsWord) + " " + pr.pts + " / " + pr.need + "</text>");
+	}
+	s.push("</svg>");
+	document.body.innerHTML = s.join("");
+}
+
+function start() {
+	var P = DLRPage.params(), acc = P.get("acc") || "", mine = ++token;
+	var names = String(P.get("n") || "Obscurus,Initiate,Seeker,Acolyte,Sentinel,Mystic,Ritualist,Emissary,Oracle,Phantom,Ascendant,Eternus").split(",");
+	var pointsWord = P.get("pl") || "Points";
+	document.body.innerHTML = "";
+	if (!/^\d+$/.test(acc)) return DLRPage.tell(P, "error");
+	load(acc).then(function (d) {
+		if (mine !== token) return;
+		var series = DLRPage.curve(d.points || [], d.last);
+		if (!series.length) return DLRPage.tell(P, "empty");
+		var now = d.now || d.last;
+		var redraw = function () { if (mine === token) draw(series, now, names, pointsWord); };
+		redraw();
+		window.onresize = redraw;
+		DLRPage.tell(P, "ready");
+	}, function () {
+		if (mine === token) DLRPage.tell(P, "error");
+	});
+}
+
+window.addEventListener("hashchange", start);
+start();
+</script>
