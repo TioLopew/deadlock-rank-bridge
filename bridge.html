@@ -1,7 +1,7 @@
 <!doctype html><meta charset="utf-8"><title>Deadlock rank mod bridge</title><script>
 // Bridge page of the Deadlock rank mod, opened by the game in a hidden HTML panel (the game's HTML panels only open
 // http(s) pages, so it is hosted on GitHub Pages):
-//   bridge.html#job=<profile|ranks>&p=<title prefix>&q=<request id>&acc=<account>|accs=<accounts>
+//   bridge.html#job=<profile|ranks|allbadges|party>&p=<title prefix>&q=<request id>&acc=<account>|accs=<accounts>|f=..&e=..
 // The page stays loaded between jobs: the game only changes the part after "#" and the next job starts at once.
 // Data comes from deadlock-api; results go back to Panorama through document.title, one short message at a time.
 var MAX_MESSAGE = 1800;
@@ -49,8 +49,27 @@ Job.prototype.sendMap = function (k, map, fin) {
 };
 
 var API = "https://api.deadlock-api.com";
-function get(path) {
-	return fetch(API + path).then(function (r) { return r.ok ? r.json() : Promise.reject("HTTP " + r.status); });
+
+// A 429 answer puts its family of requests on hold for the time deadlock-api asks (kept in the browser storage, so it
+// holds across jobs, pages and game restarts); until then the family's requests fail at once instead of piling up.
+var COOLDOWN_PREFIX = "dlr_cool_";
+
+function cooldownLeft(family) {
+	try { return Math.max(0, Number(JSON.parse(localStorage.getItem(COOLDOWN_PREFIX + family) || "0")) - Date.now()); } catch (e) { return 0; }
+}
+
+function get(path, family) {
+	var left = family ? cooldownLeft(family) : 0;
+	if (left > 0) return Promise.reject("cooldown " + Math.ceil(left / 1000) + "s");
+	return fetch(API + path).then(function (r) {
+		if (r.status === 429 && family) {
+			var s = 0;
+			try { s = Number(r.headers.get("retry-after")); } catch (e) { s = 0; }
+			if (!(s > 0)) s = 60;
+			try { localStorage.setItem(COOLDOWN_PREFIX + family, JSON.stringify(Date.now() + Math.min(s, 3600) * 1000)); } catch (e) { }
+		}
+		return r.ok ? r.json() : Promise.reject("HTTP " + r.status);
+	});
 }
 
 var METRICS_CACHE_MS = 6 * 3600 * 1000;
@@ -62,7 +81,7 @@ function metrics() {
 		var c = JSON.parse(localStorage.getItem(key) || "null");
 		if (c && Date.now() - c.t < METRICS_CACHE_MS) return Promise.resolve(c.d);
 	} catch (e) { }
-	return get("/v1/analytics/player-stats/metrics").then(function (d) {
+	return get("/v1/analytics/player-stats/metrics", "analytics").then(function (d) {
 		var keep = { accuracy: d.accuracy, crit_shot_rate: d.crit_shot_rate };
 		try { localStorage.setItem(key, JSON.stringify({ t: Date.now(), d: keep })); } catch (e) { }
 		return keep;
@@ -148,22 +167,100 @@ function storedKeys(prefix) {
 	return out;
 }
 
-// now and then drop players and badges nobody looked at for a long time
+// A player's ranked history for the rank history chart (rank-history.html reads it from this same storage):
+// { at, p: [[start time, badge after the match, rank points the match gave], ...] } oldest first. It is the biggest
+// thing kept (about 20 bytes a match), so only the most recently seen HISTORY_MAX players keep one.
+var HISTORY_PREFIX = "dlr_rh_";
+var HISTORY_MAX = 40;
+
+function storedHistory(acc) {
+	try {
+		var e = JSON.parse(localStorage.getItem(HISTORY_PREFIX + acc) || "null");
+		return e && Date.now() - e.at < STORE_KEEP_MS ? e : null;
+	} catch (x) {
+		return null;
+	}
+}
+
+function storeHistory(acc, points) {
+	try {
+		var others = storedKeys(HISTORY_PREFIX).filter(function (a) { return a !== String(acc); });
+		if (others.length >= HISTORY_MAX) {
+			others.map(function (a) { var e = storedHistory(a); return [a, e ? e.at : 0]; })
+				.sort(function (a, b) { return a[1] - b[1]; })
+				.slice(0, others.length - HISTORY_MAX + 1)
+				.forEach(function (it) { localStorage.removeItem(HISTORY_PREFIX + it[0]); });
+		}
+		localStorage.setItem(HISTORY_PREFIX + acc, JSON.stringify({ at: Date.now(), p: points }));
+	} catch (x) { }
+}
+
+// ranked matches with a badge, one per match, oldest first: [start time, badge, rank points it gave]
+function rankPoints(matches) {
+	var seen = {}, out = [];
+	matches.forEach(function (m) {
+		if (m.match_mode != 4 || !(m.ranked_display_badge > 0) || !m.start_time || seen[m.match_id]) return;
+		seen[m.match_id] = 1;
+		out.push([m.start_time, m.ranked_display_badge, typeof m.ranked_delta === "number" ? m.ranked_delta : 0]);
+	});
+	return out.sort(function (a, b) { return a[0] - b[0]; });
+}
+
+// now and then drop players, badges and histories nobody looked at for a long time
 function prune() {
 	try {
 		storedKeys(STORE_PREFIX).forEach(function (acc) { if (!stored(acc)) localStorage.removeItem(STORE_PREFIX + acc); });
 		storedKeys(BADGE_PREFIX).forEach(function (acc) { if (!storedBadge(acc)) localStorage.removeItem(BADGE_PREFIX + acc); });
+		storedKeys(HISTORY_PREFIX).forEach(function (acc) { if (!storedHistory(acc)) localStorage.removeItem(HISTORY_PREFIX + acc); });
+		storedKeys(PARTY_PREFIX).forEach(function (key) {
+			var e = null;
+			try { e = JSON.parse(localStorage.getItem(PARTY_PREFIX + key) || "null"); } catch (x) { e = null; }
+			if (!e || Date.now() - e.at > PARTY_KEEP_MS) localStorage.removeItem(PARTY_PREFIX + key);
+		});
 	} catch (x) { }
 }
 
-// the job's list of accounts ("accs")
-function accounts(job) {
-	return String(job.P.get("accs") || "").split(",").filter(function (a) { return /^\d+$/.test(a); });
+// Steam friends in one team of a match, grouped: players who are Steam friends (directly or through each other) and
+// on the same side most likely queued together (deadlock-api's own "same party" rule). Groups of two or more, as
+// lists of accounts.
+var PARTY_PREFIX = "dlr_party_";
+var PARTY_KEEP_MS = 6 * 3600 * 1000;
+
+function friendGroups(profiles, sides) {
+	var parent = {};
+	function find(a) {
+		while (parent[a] !== a) a = parent[a] = parent[parent[a]];
+		return a;
+	}
+	Object.keys(sides).forEach(function (a) { parent[a] = a; });
+	profiles.forEach(function (p) {
+		var a = String(p.account_id);
+		if (!sides[a]) return;
+		(p.friends || []).forEach(function (f) {
+			var b = String(f.account_id);
+			if (b === a || !sides[b] || sides[b] !== sides[a]) return;
+			var ra = find(a), rb = find(b);
+			if (ra !== rb) parent[ra] = rb;
+		});
+	});
+	var groups = {};
+	Object.keys(sides).forEach(function (a) {
+		var r = find(a);
+		(groups[r] = groups[r] || []).push(a);
+	});
+	return Object.keys(groups).map(function (r) { return groups[r].sort(); })
+		.filter(function (g) { return g.length >= 2; })
+		.sort(function (x, y) { return x[0] < y[0] ? -1 : 1; });
+}
+
+// the job's list of accounts (param "accs", or another one)
+function accounts(job, param) {
+	return String(job.P.get(param || "accs") || "").split(",").filter(function (a) { return /^\d+$/.test(a); });
 }
 
 // looks the badges of accs up on deadlock-api, keeps them and sends those that differ from known; ends the job
 function freshRanks(job, accs, known) {
-	get("/v1/players/rank?account_ids=" + accs.join(","))
+	get("/v1/players/rank?account_ids=" + accs.join(","), "rank")
 		.then(function (list) {
 			var fresh = {};
 			list.forEach(function (r) {
@@ -177,12 +274,13 @@ function freshRanks(job, accs, known) {
 }
 
 var jobs = {
-	// one player's profile: accuracy / headshot rate and total games / wins / last hits.
+	// one player's profile: accuracy / headshot rate, total games / wins / last hits, rank progress and the ranked
+	// history (kept for the rank history chart; the game is told how many matches it has).
 	// What this browser already knows goes out first. deadlock-api's per-hero stats answer quickly; the full match
 	// history is exact but can take half a minute, so its totals replace the quick ones once it arrives.
 	profile: function (job) {
 		var acc = job.P.get("acc");
-		var saved = stored(acc) || { t: null, full: 0, p: null };
+		var saved = stored(acc) || { t: null, full: 0, p: null, g: null };
 		var sent = {};
 		// a message that repeats what already went out is skipped
 		function give(msg) {
@@ -191,9 +289,21 @@ var jobs = {
 			sent[msg.k] = text;
 			job.send(msg, 0);
 		}
+		var oldHistory = storedHistory(acc);
 		if (saved.t) give({ k: "t", d: saved.t, full: saved.full });
 		if (saved.p) give({ k: "p", d: saved.p });
-		if (!saved.t && !saved.p) job.send({ k: "hi" }, 0);
+		if (saved.g) give({ k: "g", d: saved.g });
+		if (oldHistory) give({ k: "h", d: oldHistory.p.length });
+		if (!saved.t && !saved.p && !saved.g) job.send({ k: "hi" }, 0);
+		// rank progress: badge and rank points after the latest ranked match
+		var progress = get("/v1/players/" + acc + "/rank").then(function (r) {
+			if (!r || typeof r.badge !== "number") return;
+			var fp = r.last_match && typeof r.last_match.player_rank_final_flat_progress === "number" ? r.last_match.player_rank_final_flat_progress : null;
+			saved.g = [r.badge, fp];
+			storeBadge(acc, r.badge);
+			store(acc, saved);
+			give({ k: "g", d: saved.g });
+		}, function () { });
 		if (Math.random() < 0.05) prune();
 		var full = false;
 		var heroes = get("/v1/players/hero-stats?account_ids=" + acc + "&game_mode=normal").then(function (list) {
@@ -234,8 +344,34 @@ var jobs = {
 			saved.full = 1;
 			store(acc, saved);
 			give({ k: "t", d: t, full: 1 });
+			var points = rankPoints(all);
+			storeHistory(acc, points);
+			give({ k: "h", d: points.length });
 		}, function () { });
-		Promise.all([stats, history]).then(function () { job.send({ k: "done" }, 1); });
+		Promise.all([stats, history, progress]).then(function () { job.send({ k: "done" }, 1); });
+	},
+
+	// Steam friends grouped per team of a match (f / e: the two teams' accounts), for the party markers. The same
+	// line-up is answered from storage for a few hours.
+	party: function (job) {
+		var sides = {}, f = accounts(job, "f"), e = accounts(job, "e");
+		f.forEach(function (a) { sides[a] = "f"; });
+		e.forEach(function (a) { if (!sides[a]) sides[a] = "e"; });
+		var all = Object.keys(sides).sort();
+		if (!all.length) return job.send({ k: "party", d: [] }, 1);
+		var key = PARTY_PREFIX + f.slice().sort().join(".") + "_" + e.slice().sort().join(".");
+		try {
+			var c = JSON.parse(localStorage.getItem(key) || "null");
+			if (c && Date.now() - c.at < PARTY_KEEP_MS) return job.send({ k: "party", d: c.g }, 1);
+		} catch (x) { }
+		job.send({ k: "hi" }, 0);
+		get("/v1/players/steam?account_ids=" + all.join(","))
+			.then(function (profiles) {
+				var groups = friendGroups(profiles || [], sides);
+				try { localStorage.setItem(key, JSON.stringify({ at: Date.now(), g: groups })); } catch (x) { }
+				job.send({ k: "party", d: groups }, 1);
+			})
+			.catch(function (err) { job.send({ k: "e", e: String(err) }, 1); });
 	},
 
 	// rank badges of several players: those this browser keeps go out first, then the ones that changed
