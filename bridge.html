@@ -1,9 +1,12 @@
-<!doctype html><meta charset="utf-8"><title>Deadlock rank mod bridge</title><script>
+<!doctype html><meta charset="utf-8"><title>Deadlock rank mod bridge</title><script src="shared.js?v=2"></script><script>
 // Bridge page of the Deadlock rank mod, opened by the game in a hidden HTML panel (the game's HTML panels only open
 // http(s) pages, so it is hosted on GitHub Pages):
 //   bridge.html#job=<profile|ranks|allbadges|party>&p=<title prefix>&q=<request id>&acc=<account>|accs=<accounts>|f=..&e=..
 // The page stays loaded between jobs: the game only changes the part after "#" and the next job starts at once.
 // Data comes from deadlock-api; results go back to Panorama through document.title, one short message at a time.
+// Ranked seasons (rank points scale, which season is on) come from shared.js. A job with sz=1 (mod builds that know
+// seasons) gets a badge whose player has no ranked match in the current season yet as badge + 1000 ("last season's"),
+// older builds get the plain badge.
 var MAX_MESSAGE = 1800;
 var SPACING_MS = 250;   // time between two titles, so the game sees every one of them
 var queue = [], busy = false, seq = 0, current = null;
@@ -139,8 +142,22 @@ function store(acc, e) {
 	try { localStorage.setItem(STORE_PREFIX + acc, JSON.stringify(e)); } catch (x) { }
 }
 
-// rank badges (tier * 10 + subrank, 0 = no rank) are kept the same way: account -> [badge, time looked up]
+// rank badges (tier * 10 + subrank, 0 = no rank) are kept the same way: account -> [badge, time looked up, 1 when
+// the badge is from an earlier season (no ranked match in the current one), else 0]. Entries without that flag were
+// kept before seasons were known: their flag is unknown, so they count as old for a fresh look-up.
 var BADGE_PREFIX = "dlr_badge_";
+var OLD_SEASON = 1000;
+
+// whether a /rank answer's badge is from before the current season
+function oldSeason(r) {
+	var t = r && r.last_match && r.last_match.start_time;
+	return !!(r && r.badge > 0 && t && t < DLRPage.seasonAt(Date.now() / 1000).start);
+}
+
+// the badge as a job gets it: with sz, an earlier season's badge + OLD_SEASON
+function badgeFor(job, badge, old) {
+	return job.P.get("sz") === "1" && old && badge > 0 ? badge + OLD_SEASON : badge;
+}
 
 function storedBadge(acc) {
 	try {
@@ -151,8 +168,8 @@ function storedBadge(acc) {
 	}
 }
 
-function storeBadge(acc, badge) {
-	try { localStorage.setItem(BADGE_PREFIX + acc, JSON.stringify([badge, Date.now()])); } catch (x) { }
+function storeBadge(acc, badge, old) {
+	try { localStorage.setItem(BADGE_PREFIX + acc, JSON.stringify([badge, Date.now(), old ? 1 : 0])); } catch (x) { }
 }
 
 // every key of the browser storage that starts with prefix, without the prefix
@@ -264,8 +281,9 @@ function freshRanks(job, accs, known) {
 		.then(function (list) {
 			var fresh = {};
 			list.forEach(function (r) {
-				var badge = typeof r.badge === "number" ? r.badge : 0;
-				storeBadge(r.account_id, badge);
+				var badge = typeof r.badge === "number" ? r.badge : 0, old = oldSeason(r);
+				storeBadge(r.account_id, badge, old);
+				badge = badgeFor(job, badge, old);
 				if (known[r.account_id] !== badge) fresh[r.account_id] = badge;
 			});
 			job.sendMap("r", fresh, 1);
@@ -299,12 +317,17 @@ var jobs = {
 		var progress = get("/v1/players/" + acc + "/rank").then(function (r) {
 			if (!r || typeof r.badge !== "number") return;
 			var fp = r.last_match && typeof r.last_match.player_rank_final_flat_progress === "number" ? r.last_match.player_rank_final_flat_progress : null;
-			saved.g = [r.badge, fp];
-			storeBadge(acc, r.badge);
+			// [badge, rank points, points into the subrank, points the subrank takes (both in the season of the
+			// latest ranked match; null for Eternus), 1 if that match is from an earlier season, its season number]
+			var t = r.last_match && r.last_match.start_time, old = oldSeason(r), pr = DLRPage.progress(r.badge, fp, t);
+			saved.g = [r.badge, fp, pr ? pr.pts : null, pr ? pr.need : null, old ? 1 : 0, t ? DLRPage.seasonAt(t).n : 0];
+			storeBadge(acc, r.badge, old);
 			store(acc, saved);
 			give({ k: "g", d: saved.g });
 		}, function () { });
 		if (Math.random() < 0.05) prune();
+		// deadlock-api's season list, at most once a day (the built-in one covers the seasons known when this was made)
+		DLRPage.loadSeasons();
 		var full = false;
 		var heroes = get("/v1/players/hero-stats?account_ids=" + acc + "&game_mode=normal").then(function (list) {
 			// stored totals from the full history beat fresh quick ones
@@ -379,7 +402,7 @@ var jobs = {
 		var accs = accounts(job), known = {};
 		accs.forEach(function (a) {
 			var e = storedBadge(a);
-			if (e) known[a] = e[0];
+			if (e) known[a] = badgeFor(job, e[0], e[2] !== 0);
 		});
 		if (Math.random() < 0.05) prune();
 		if (Object.keys(known).length) job.sendMap("r", known, 0);
@@ -394,7 +417,8 @@ var jobs = {
 		var now = Date.now(), items = [], accs = accounts(job), since = Number(job.P.get("since")) || 0;
 		storedKeys(BADGE_PREFIX).forEach(function (acc) {
 			var e = storedBadge(acc);
-			if (e && e[1] >= since) items.push([acc, e[0], now - e[1]]);
+			// without a season flag (kept before seasons were known) it goes out as hours old: looked up again soon
+			if (e && e[1] >= since) items.push([acc, badgeFor(job, e[0], e[2] !== 0), e.length > 2 ? now - e[1] : Math.max(now - e[1], 4 * 3600 * 1000)]);
 		});
 		items.sort(function (a, b) { return a[2] - b[2]; });
 		var parts = [], cur = "", known = {};
