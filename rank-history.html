@@ -4,11 +4,14 @@ html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background:
 svg { display: block; }
 </style>
 <body>
-<script src="shared.js?v=1"></script>
+<script src="shared.js?v=2"></script>
 <script>
 // Rank history chart of the profile page: rank-history.html#acc=<account>&p=<title prefix>&q=<request id>
 //   &n=<the 12 tier names, in the game's language>&pl=<"points" in the game's language>
-// The whole ranked history, one point per match; the line follows the rank points, not only the badges.
+//   &s=<season number to show; without it the newest season the player has ranked matches in>
+//   &fin=<"end of season" in the game's language>
+// One ranked season's history, one point per match; the line follows the rank points, not only the badges. The
+// title tells the game which seasons have matches (ss) and which one shows (s), for its season buttons.
 var token = 0;
 
 // ranked points and the rank now: what the bridge page keeps, else a small load of our own
@@ -53,7 +56,7 @@ function date(t) {
 var MAX_LINE_POINTS = 400;
 var ACCENT = "#3fbf7f", MUTED = "#c4c9d0";
 
-function draw(series, now, names, pointsWord) {
+function draw(series, now, names, pointsWord, finWord) {
 	var W = Math.max(320, window.innerWidth || 1000), H = Math.max(90, window.innerHeight || 170);
 	var left = Math.round(W * 0.13), right = Math.round(W * 0.17), top = 10, bottom = 22;
 	var plotW = W - left - right, plotH = H - top - bottom, plotBottom = top + plotH;
@@ -95,14 +98,15 @@ function draw(series, now, names, pointsWord) {
 		var anchor = n === 1 ? "middle" : i === 0 ? "start" : i === n - 1 ? "end" : "middle";
 		s.push('<text x="' + r2(xs[i]) + '" y="' + (H - 6) + '" fill="' + MUTED + '" font-size="12" font-weight="700" text-anchor="' + anchor + '">' + date(line[i][0]) + "</text>");
 	});
-	// the rank now: badge icon, name and subrank, points of the subrank
+	// the rank now: badge icon, name and subrank, points of the subrank (an older season: its final badge)
 	var badge = now && now[0] > 0 ? now[0] : series[series.length - 1][2], ts = DLRPage.split(badge);
 	if (ts) {
 		var cx = left + plotW + 14, cy = top + plotH / 2;
 		s.push('<image href="ranks/tier' + ("0" + ts[0]).slice(-2) + '.webp" x="' + cx + '" y="' + r2(cy - 34) + '" width="34" height="34"/>');
 		s.push('<text x="' + (cx + 40) + '" y="' + r2(cy - 11) + '" fill="' + DLRPage.lift(DLRPage.COLORS[ts[0]]) + '" font-size="16" font-weight="800">' +
 			DLRPage.esc((names[ts[0]] || "") + " " + DLRPage.ROMAN[ts[1]]) + "</text>");
-		var pr = now ? DLRPage.progress(now[0], now[1]) : null;
+		var pr = now ? DLRPage.progress(now[0], now[1], series[series.length - 1][0]) : null;
+		if (!now && finWord) s.push('<text x="' + cx + '" y="' + r2(cy + 18) + '" fill="' + MUTED + '" font-size="13" font-weight="700">' + DLRPage.esc(finWord) + "</text>");
 		if (pr) s.push('<text x="' + cx + '" y="' + r2(cy + 18) + '" fill="' + MUTED + '" font-size="13" font-weight="700">' + DLRPage.esc(pointsWord) + " " + pr.pts + " / " + pr.need + "</text>");
 	}
 	s.push("</svg>");
@@ -110,20 +114,27 @@ function draw(series, now, names, pointsWord) {
 }
 
 function start() {
-	var P = DLRPage.params(), acc = P.get("acc") || "", mine = ++token;
+	var P = DLRPage.params(), acc = P.get("acc") || "", mine = ++token, want = Number(P.get("s")) || 0;
 	var names = String(P.get("n") || "Obscurus,Initiate,Seeker,Acolyte,Sentinel,Mystic,Ritualist,Emissary,Oracle,Phantom,Ascendant,Eternus").split(",");
-	var pointsWord = P.get("pl") || "Points";
+	var pointsWord = P.get("pl") || "Points", finWord = P.get("fin") || "";
 	document.body.innerHTML = "";
 	if (!/^\d+$/.test(acc)) return DLRPage.tell(P, "error");
-	load(acc).then(function (d) {
+	Promise.all([load(acc), DLRPage.loadSeasons()]).then(function (r) {
 		if (mine !== token) return;
-		var series = DLRPage.curve(d.points || [], d.last);
-		if (!series.length) return DLRPage.tell(P, "empty");
-		var now = d.now || d.last;
-		var redraw = function () { if (mine === token) draw(series, now, names, pointsWord); };
+		var d = r[0], all = DLRPage.curve(d.points || [], d.last, !d.last && !(d.points || []).some(function (p) { return p[2]; }));
+		var have = [];
+		all.forEach(function (p) { if (have.indexOf(p[3]) < 0) have.push(p[3]); });
+		if (!all.length) return DLRPage.tell(P, "empty", { ss: [], s: 0 });
+		var shown = have.indexOf(want) >= 0 ? want : have[have.length - 1];
+		var series = all.filter(function (p) { return p[3] === shown; });
+		// the badge and points now belong to the current season's line only; an older season shows how it ended
+		var current = DLRPage.seasonAt(Date.now() / 1000).n;
+		var now = shown === current && shown === all[all.length - 1][3] ? d.now || d.last : null;
+		if (now && now[0] !== series[series.length - 1][2]) now = [series[series.length - 1][2], null];
+		var redraw = function () { if (mine === token) draw(series, now, names, pointsWord, finWord); };
 		redraw();
 		window.onresize = redraw;
-		DLRPage.tell(P, "ready");
+		DLRPage.tell(P, "ready", { ss: have, s: shown });
 	}, function () {
 		if (mine === token) DLRPage.tell(P, "error");
 	});
