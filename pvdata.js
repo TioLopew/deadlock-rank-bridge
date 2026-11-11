@@ -7,10 +7,11 @@ var DLRPV = (function () {
 
 	// deadlock-api: one 429 cooldown for the page's requests ("pv"), and one more try a moment later on a network / 5xx
 	// failure
-	function api(path) {
-		return DLRPage.get(path, "pv").catch(function (e) {
+	// (fresh: past the browser's own cache of the answer, which deadlock-api lets it keep 5 minutes)
+	function api(path, fresh) {
+		return DLRPage.get(path, "pv", fresh).catch(function (e) {
 			if (/429|cooldown|HTTP 4\d\d/.test(String(e))) return Promise.reject(e);
-			return new Promise(function (r) { setTimeout(r, 1200); }).then(function () { return DLRPage.get(path, "pv"); });
+			return new Promise(function (r) { setTimeout(r, 1200); }).then(function () { return DLRPage.get(path, "pv", fresh); });
 		});
 	}
 
@@ -18,8 +19,10 @@ var DLRPV = (function () {
 	// compact, newest first: [match id, hero, start, duration s, match mode, game mode, win, k, d, a, souls, last hits,
 	// denies, rank gain, badge, placement match, demotion protection used, left the match]
 	var M = { id: 0, hero: 1, t: 2, dur: 3, mode: 4, gmode: 5, win: 6, k: 7, d: 8, a: 9, nw: 10, lh: 11, dn: 12, delta: 13, badge: 14, cal: 15, prot: 16, left: 17 };
-	// the last few players looked at keep theirs (the same entries profile.html keeps)
-	var MH_PREFIX = "dlr_pv_mh_", MH_KEEP = 4, MH_FRESH_MS = 2 * MIN, MH_MAX_MS = 3 * DAYMS;
+	// the players looked at last keep theirs (the same entries profile.html keeps): up to MH_KEEP of them within
+	// MH_BUDGET characters of storage, the oldest go first. A kept one shows at once (then the fresh one replaces it)
+	// for MH_MAX_MS; within MH_FRESH_MS it is not asked again.
+	var MH_PREFIX = "dlr_pv_mh_", MH_KEEP = 16, MH_BUDGET = 2500000, MH_FRESH_MS = 45 * 1000, MH_MAX_MS = 30 * DAYMS;
 
 	function compact(list) {
 		var seen = {}, out = [];
@@ -35,28 +38,34 @@ var DLRPV = (function () {
 		return out.sort(function (a, b) { return b[2] - a[2]; });
 	}
 
+	// the other players' kept histories, oldest first: [key, time kept, size] (the time is read off the start of the
+	// text, {"at":..., so the big lists are not parsed)
 	function otherHistories(acc) {
 		var out = [];
 		try {
 			for (var i = 0; i < localStorage.length; i++) {
 				var k = localStorage.key(i);
 				if (k && k.indexOf(MH_PREFIX) === 0 && k !== MH_PREFIX + acc) {
-					var e = DLRPage.read(k, MH_MAX_MS * 10);
-					out.push([k, e ? e.at : 0]);
+					var text = localStorage.getItem(k) || "", at = /^\{"at":(\d+)/.exec(text);
+					out.push([k, at ? Number(at[1]) : 0, text.length]);
 				}
 			}
 		} catch (e) { }
-		return out.sort(function (a, b) { return a[1] - b[1]; }).map(function (x) { return x[0]; });
+		return out.sort(function (a, b) { return a[1] - b[1]; });
 	}
 
 	function keepHistory(acc, list) {
-		var others = otherHistories(acc);
-		others.slice(0, Math.max(0, others.length - (MH_KEEP - 1))).forEach(function (k) { try { localStorage.removeItem(k); } catch (e) { } });
 		var text = JSON.stringify({ at: Date.now(), d: list });
+		var others = otherHistories(acc), size = text.length;
+		others.forEach(function (x) { size += x[2]; });
+		for (var i = 0; i < others.length && (others.length - i >= MH_KEEP || size > MH_BUDGET); i++) {
+			size -= others[i][2];
+			try { localStorage.removeItem(others[i][0]); } catch (e) { }
+		}
 		try {
 			localStorage.setItem(MH_PREFIX + acc, text);
 		} catch (e) {
-			otherHistories(acc).forEach(function (k) { try { localStorage.removeItem(k); } catch (x) { } });
+			otherHistories(acc).forEach(function (x) { try { localStorage.removeItem(x[0]); } catch (y) { } });
 			try { localStorage.setItem(MH_PREFIX + acc, text); } catch (x) { }
 		}
 	}
@@ -65,7 +74,7 @@ var DLRPV = (function () {
 	var loading = {};
 	function fetchHistory(acc) {
 		if (!loading[acc]) {
-			loading[acc] = api("/v1/players/" + acc + "/match-history").then(function (list) {
+			loading[acc] = api("/v1/players/" + acc + "/match-history", true).then(function (list) {
 				var out = compact(list);
 				keepHistory(acc, out);
 				delete loading[acc];
@@ -358,5 +367,5 @@ var DLRPV = (function () {
 	}
 
 	return { M: M, history: history, rankHistory: rankHistory, matches: matches, streaks: streaks, row: row, summary: summary, builds: builds, heroStats: heroStats,
-		stats: stats, mates: mates, counted: counted };
+		stats: stats, mates: mates, counted: counted, keepHistory: keepHistory };
 })();
