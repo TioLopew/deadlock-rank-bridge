@@ -80,7 +80,7 @@ var DLRPage = (function () {
 	}
 
 	// { status, headers, data } of an answer (data: its json when ok); rejects { net } when no whole answer came
-	function fetchJson(url) {
+	function fetchJson(url, fresh) {
 		return new Promise(function (resolve, reject) {
 			var over = false, ctl = null, timer = null, started = Date.now();
 			try { ctl = typeof AbortController === "function" ? new AbortController() : null; } catch (e) { ctl = null; }
@@ -106,7 +106,11 @@ var DLRPage = (function () {
 				resolve(x);
 			}
 			wait(FIRST_MS, "no answer");
-			fetch(url, ctl ? { signal: ctl.signal } : undefined).then(function (r) {
+			var opts = {};
+			if (ctl) opts.signal = ctl.signal;
+			// fresh: asked again past the browser's own cache (deadlock-api lets it keep answers 5 minutes)
+			if (fresh) opts.cache = "no-cache";
+			fetch(url, opts).then(function (r) {
 				if (over) return;
 				if (!r.ok) return done({ status: r.status, headers: r.headers, data: null });
 				var reader = null;
@@ -138,11 +142,11 @@ var DLRPage = (function () {
 	}
 
 	// deadlock-api: the kept way first, then each way in order
-	function apiFetch(path) {
+	function apiFetch(path, fresh) {
 		var kept = viaWay(), order = kept ? [kept].concat(WAYS.filter(function (w) { return w !== kept; })) : WAYS.slice();
 		function from(i, last) {
 			if (i >= order.length) return Promise.reject(last || { net: "no way" });
-			return fetchJson(order[i] + path).then(function (x) {
+			return fetchJson(order[i] + path, fresh).then(function (x) {
 				if (i > 0 || kept) keepWay(order[i]);
 				return x;
 			}, function (e) { return from(i + 1, e); });
@@ -154,10 +158,10 @@ var DLRPage = (function () {
 		return !!viaWay();
 	}
 
-	function get(path, family) {
+	function get(path, family, fresh) {
 		var left = family ? cooldownLeft(family) : 0;
 		if (left > 0) return Promise.reject("cooldown " + Math.ceil(left / 1000) + "s");
-		return apiFetch(path).then(function (r) {
+		return apiFetch(path, fresh).then(function (r) {
 			if (r.status === 429 && family) {
 				var s = 0;
 				try { s = Number(r.headers.get("retry-after")); } catch (e) { s = 0; }
