@@ -226,7 +226,7 @@
 	//  badge, placement match, demotion protection used, left the match]
 	// The last few players looked at keep theirs: a profile opened again shows it at once and asks for a fresh one
 	// after a couple of minutes (onUpdate gets it when it differs).
-	var MH_PREFIX = "dlr_pv_mh_", MH_KEEP = 3, MH_FRESH_MS = 2 * MIN, MH_MAX_MS = 3 * DAYMS;
+	var MH_PREFIX = "dlr_pv_mh_", MH_KEEP = 16, MH_FRESH_MS = 45 * 1000, MH_MAX_MS = 30 * DAYMS;
 
 	function compact(list) {
 		var seen = {}, out = [];
