@@ -1,0 +1,68 @@
+<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Проверка связи мода рангов</title>
+<style>
+:root { color-scheme: dark; }
+body { margin: 0; padding: 24px 16px; background: #15120e; color: #f3e9da; font: 16px/1.4 "Segoe UI", system-ui, sans-serif; }
+main { max-width: 760px; margin: 0 auto; }
+h1 { font-size: 22px; margin: 0 0 6px; }
+p { color: #c9bca8; margin: 0 0 18px; }
+table { width: 100%; border-collapse: collapse; }
+td { padding: 10px 8px; border-top: 1px solid #ffffff1a; vertical-align: top; }
+td.r { width: 120px; font-weight: 700; white-space: nowrap; }
+.ok { color: #61e761; } .bad { color: #f07070; } .wait { color: #e8a23a; }
+small { color: #9c907e; }
+#sum { margin-top: 18px; padding: 12px; border-radius: 6px; background: #ffffff0d; font-weight: 600; }
+</style>
+<main>
+<h1>Проверка связи мода рангов</h1>
+<p>Открой эту страницу без VPN и пришли скрин целиком, когда все строки станут зелёными или красными (до 30 секунд).</p>
+<table id="t"></table>
+<div id="sum">Проверяю…</div>
+<p style="margin-top:14px"><small id="ua"></small></p>
+</main>
+<script>
+// What reaches this browser: deadlock-api straight (Cloudflare), the mod's mirror (Vercel), GitHub Pages (the bridge
+// page's host); a small answer and a big one each, since some providers cut connections after the first ~16 KB.
+var ACC = "385814004";
+var TESTS = [
+	["GitHub Pages: страница бриджа", "https://tiolopew.github.io/deadlock-rank-bridge/bridge.html"],
+	["GitHub Pages: большой файл", "https://tiolopew.github.io/deadlock-rank-bridge/profile.js"],
+	["API напрямую: маленький ответ", "https://api.deadlock-api.com/v1/info"],
+	["API напрямую: история матчей", "https://api.deadlock-api.com/v1/players/" + ACC + "/match-history"],
+	["Зеркало (Vercel): маленький ответ", "https://deadlock-rank-mirror.vercel.app/v1/info"],
+	["Зеркало (Vercel): история матчей", "https://deadlock-rank-mirror.vercel.app/v1/players/" + ACC + "/match-history"]
+];
+var t = document.getElementById("t"), results = [];
+document.getElementById("ua").textContent = new Date().toISOString() + " · " + navigator.userAgent;
+function run(test, i) {
+	var row = t.insertRow(), name = row.insertCell(), res = row.insertCell();
+	name.innerHTML = test[0] + "<br><small>" + test[1].replace(/^https:\/\//, "") + "</small>";
+	res.className = "r wait";
+	res.textContent = "…";
+	var t0 = performance.now(), ctl = new AbortController();
+	var timer = setTimeout(function () { ctl.abort(); }, 25000);
+	return fetch(test[1] + (test[1].indexOf("?") < 0 ? "?" : "&") + "nocache=" + Date.now(), { signal: ctl.signal, cache: "no-store" })
+		.then(function (r) {
+			return r.arrayBuffer().then(function (b) { return [r.status, b.byteLength]; });
+		})
+		.then(function (x) {
+			var ok = x[0] >= 200 && x[0] < 300;
+			res.className = "r " + (ok ? "ok" : "bad");
+			res.innerHTML = (ok ? "OK" : "HTTP " + x[0]) + "<br><small>" + Math.round(x[1] / 1024) + " КБ · " + ((performance.now() - t0) / 1000).toFixed(1) + " с</small>";
+			results[i] = ok;
+		}, function (e) {
+			res.className = "r bad";
+			res.innerHTML = (e && e.name === "AbortError" ? "завис" : "ошибка") + "<br><small>" + ((performance.now() - t0) / 1000).toFixed(1) + " с</small>";
+			results[i] = false;
+		})
+		.then(function () { clearTimeout(timer); });
+}
+Promise.all(TESTS.map(run)).then(function () {
+	var gh = results[0] && results[1], direct = results[3], mirror = results[5];
+	document.getElementById("sum").textContent =
+		!gh ? "GitHub Pages не открывается целиком: бриджу нужен другой хостинг." :
+		direct ? "Всё напрямую работает: проблема не в сети (пришли скрин всё равно)." :
+		mirror ? "Напрямую режется, зеркало работает: мод должен ходить через зеркало." :
+		"Режется и прямой API, и зеркало на Vercel: нужно зеркало на российском хостинге.";
+});
+</script>
