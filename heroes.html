@@ -1,0 +1,130 @@
+<!doctype html><meta charset="utf-8"><title>Deadlock rank mod: heroes and teammates</title>
+<style>
+html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #000; color: #fff; font-family: Radiance, "Segoe UI", sans-serif; }
+svg { display: block; }
+</style>
+<body>
+<script src="shared.js?v=3"></script>
+<script>
+// Heroes / teammates tab of the profile page: heroes.html#acc=<account>&p=<title prefix>&q=<request id>
+//   &lang=<game language>&h=<"Heroes">&m=<"Teammates">&g=<"Games">
+// Left: the player's most played heroes (games, win rate, KDA). Right: who they queue with most (deadlock-api's
+// same_party mates: games together, win rate together). Drawn on black like the other chart pages.
+var token = 0;
+var ROWS = 5;
+var HEROES_MS = 7 * 24 * 3600 * 1000, PLAYER_MS = 30 * 60 * 1000;
+
+// hero id -> [name, small picture] in the game's language, kept a week (the full list is ~2 MB)
+function heroNames(lang) {
+	var key = "dlr_heroes_" + lang, kept = DLRPage.read(key, HEROES_MS);
+	if (kept) return Promise.resolve(kept.m);
+	return DLRPage.get("/v1/assets/heroes?language=" + encodeURIComponent(lang) + "&only_active=true").then(function (list) {
+		var m = {};
+		(list || []).forEach(function (h) {
+			var img = h.images || {};
+			m[h.id] = [h.name || "", img.icon_image_small_webp || img.icon_image_small || ""];
+		});
+		DLRPage.write(key, { m: m });
+		return m;
+	}, function () { return lang !== "english" ? heroNames("english") : {}; });
+}
+
+// { heroes: [[id, games, wins, k, d, a], ...], mates: [[account, games, wins, name, avatar], ...] }, kept half an hour
+function load(acc) {
+	var key = "dlr_hp_" + acc, kept = DLRPage.read(key, PLAYER_MS);
+	if (kept) return Promise.resolve(kept.d);
+	var heroes = DLRPage.get("/v1/players/hero-stats?account_ids=" + acc + "&game_mode=normal").then(function (list) {
+		return (list || []).filter(function (h) { return h.matches_played > 0; })
+			.sort(function (a, b) { return b.matches_played - a.matches_played; })
+			.slice(0, ROWS)
+			.map(function (h) { return [h.hero_id, h.matches_played, h.wins || 0, h.kills || 0, h.deaths || 0, h.assists || 0]; });
+	});
+	var mates = DLRPage.get("/v1/players/" + acc + "/mate-stats?same_party=true&min_matches_played=2").then(function (list) {
+		var top = (list || []).sort(function (a, b) { return b.matches_played - a.matches_played; }).slice(0, ROWS);
+		if (!top.length) return [];
+		return DLRPage.get("/v1/players/steam?account_ids=" + top.map(function (m) { return m.mate_id; }).join(",")).then(function (profiles) {
+			var by = {};
+			(profiles || []).forEach(function (p) { by[p.account_id] = p; });
+			return top.map(function (m) {
+				var p = by[m.mate_id] || {};
+				return [m.mate_id, m.matches_played, m.wins || 0, p.personaname || String(m.mate_id), p.avatar || ""];
+			});
+		}, function () {
+			return top.map(function (m) { return [m.mate_id, m.matches_played, m.wins || 0, String(m.mate_id), ""]; });
+		});
+	}, function () { return []; });
+	return Promise.all([heroes, mates]).then(function (r) {
+		var d = { heroes: r[0], mates: r[1] };
+		DLRPage.write(key, { d: d });
+		return d;
+	});
+}
+
+var MUTED = "#c4c9d0", GOOD = "#6ee8a8", BAD = "#ff8a8a";
+
+function rateColor(r) {
+	return r >= 0.55 ? GOOD : r <= 0.45 ? BAD : "#ffefd7";
+}
+
+// a name cut to fit about px pixels at 13px
+function cut(s, px) {
+	s = String(s || "");
+	var max = Math.max(4, Math.floor(px / 7.2));
+	return s.length > max ? s.slice(0, max - 1) + "…" : s;
+}
+
+function draw(d, names, P) {
+	var W = Math.max(320, window.innerWidth || 900), H = Math.max(90, window.innerHeight || 134);
+	var esc = DLRPage.esc, r2 = DLRPage.r2;
+	var colW = (W - 30) / 2, top = 18, rowH = Math.min(26, (H - top - 4) / ROWS), icon = Math.min(22, rowH - 3);
+	var s = ['<svg xmlns="http://www.w3.org/2000/svg" width="' + W + '" height="' + H + '" font-family="Radiance, Segoe UI, sans-serif">'];
+	function header(x, title) {
+		s.push('<text x="' + x + '" y="12" fill="' + MUTED + '" font-size="12" font-weight="800" letter-spacing="1.5">' + esc(String(title).toUpperCase()) + "</text>");
+		s.push('<text x="' + r2(x + colW - 150) + '" y="12" fill="' + MUTED + '" font-size="11" font-weight="700" text-anchor="end">' + esc(String(P.get("g") || "Games").toUpperCase()) + "</text>");
+		s.push('<text x="' + r2(x + colW - 92) + '" y="12" fill="' + MUTED + '" font-size="11" font-weight="700" text-anchor="end">WR</text>');
+	}
+	function row(x, i, img, name, games, wins, extra) {
+		var y = top + i * rowH, mid = y + rowH / 2, rate = games ? wins / games : 0;
+		if (i % 2 === 0) s.push('<rect x="' + x + '" y="' + r2(y) + '" width="' + r2(colW) + '" height="' + r2(rowH) + '" fill="#fff" fill-opacity="0.04" rx="3"/>');
+		if (img) s.push('<image href="' + esc(img) + '" x="' + (x + 4) + '" y="' + r2(mid - icon / 2) + '" width="' + r2(icon) + '" height="' + r2(icon) + '" preserveAspectRatio="xMidYMid slice"/>');
+		s.push('<text x="' + r2(x + icon + 10) + '" y="' + r2(mid + 4.5) + '" fill="#ffefd7" font-size="13" font-weight="700">' + esc(cut(name, colW - icon - 210)) + "</text>");
+		s.push('<text x="' + r2(x + colW - 150) + '" y="' + r2(mid + 4.5) + '" fill="#ffefd7" font-size="13" font-weight="700" text-anchor="end">' + games + "</text>");
+		s.push('<text x="' + r2(x + colW - 92) + '" y="' + r2(mid + 4.5) + '" fill="' + rateColor(rate) + '" font-size="13" font-weight="800" text-anchor="end">' + Math.round(rate * 100) + "%</text>");
+		// win rate bar
+		var bx = x + colW - 84, bw = 40;
+		s.push('<rect x="' + r2(bx) + '" y="' + r2(mid - 2) + '" width="' + bw + '" height="4" fill="#fff" fill-opacity="0.12" rx="2"/>');
+		s.push('<rect x="' + r2(bx) + '" y="' + r2(mid - 2) + '" width="' + r2(bw * Math.min(1, rate)) + '" height="4" fill="' + rateColor(rate) + '" rx="2"/>');
+		if (extra) s.push('<text x="' + r2(x + colW - 4) + '" y="' + r2(mid + 4) + '" fill="' + MUTED + '" font-size="11" font-weight="700" text-anchor="end">' + esc(extra) + "</text>");
+	}
+	header(6, P.get("h") || "Heroes");
+	d.heroes.forEach(function (h, i) {
+		var n = names[h[0]] || ["#" + h[0], ""], kda = (h[3] + h[5]) / Math.max(1, h[4]);
+		row(6, i, n[1], n[0], h[1], h[2], "KDA " + kda.toFixed(1));
+	});
+	var mx = 24 + colW;
+	header(mx, P.get("m") || "Teammates");
+	d.mates.forEach(function (m, i) { row(mx, i, m[4], m[3], m[1], m[2], ""); });
+	if (!d.mates.length) s.push('<text x="' + r2(mx + 6) + '" y="' + r2(top + rowH / 2 + 4) + '" fill="' + MUTED + '" font-size="13" font-weight="700">—</text>');
+	s.push("</svg>");
+	document.body.innerHTML = s.join("");
+}
+
+function start() {
+	var P = DLRPage.params(), acc = P.get("acc") || "", lang = P.get("lang") || "english", mine = ++token;
+	document.body.innerHTML = "";
+	if (!/^\d+$/.test(acc)) return DLRPage.tell(P, "error");
+	Promise.all([load(acc), heroNames(lang)]).then(function (r) {
+		if (mine !== token) return;
+		if (!r[0].heroes.length && !r[0].mates.length) return DLRPage.tell(P, "empty");
+		var redraw = function () { if (mine === token) draw(r[0], r[1], P); };
+		redraw();
+		window.onresize = redraw;
+		DLRPage.tell(P, "ready");
+	}, function () {
+		if (mine === token) DLRPage.tell(P, "error");
+	});
+}
+
+window.addEventListener("hashchange", start);
+start();
+</script>
