@@ -1,4 +1,4 @@
-<!doctype html><meta charset="utf-8"><title>Deadlock rank mod bridge</title><script src="shared.js?v=e2f2d445b5"></script><script src="playstyle.js?v=e114d79377"></script><script src="pvdata.js?v=f757c05cd8"></script><script>
+<!doctype html><meta charset="utf-8"><title>Deadlock rank mod bridge</title><script src="shared.js?v=2098d4c325"></script><script src="playstyle.js?v=e114d79377"></script><script src="pvdata.js?v=f757c05cd8"></script><script>
 // Bridge page of the Deadlock rank mod, opened by the game in a hidden HTML panel (the game's HTML panels only open
 // http(s) pages, so it is hosted on GitHub Pages):
 //   bridge.html#job=<profile|ranks|allbadges|party>&p=<title prefix>&q=<request id>&acc=<account>|accs=<accounts>|f=..&e=..
@@ -87,14 +87,17 @@ function cooldownLeft(family) {
 function get(path, family) {
 	var left = family ? cooldownLeft(family) : 0;
 	if (left > 0) return Promise.reject("cooldown " + Math.ceil(left / 1000) + "s");
-	return fetch(API + path).then(function (r) {
+	// straight to deadlock-api, or through the mod's mirror when the straight way is cut (shared.js)
+	return DLRPage.apiFetch(path).then(function (r) {
 		if (r.status === 429 && family) {
 			var s = 0;
 			try { s = Number(r.headers.get("retry-after")); } catch (e) { s = 0; }
 			if (!(s > 0)) s = 60;
 			try { localStorage.setItem(COOLDOWN_PREFIX + family, JSON.stringify(Date.now() + Math.min(s, 3600) * 1000)); } catch (e) { }
 		}
-		return r.ok ? r.json() : Promise.reject("HTTP " + r.status);
+		return r.status >= 200 && r.status < 300 ? r.data : Promise.reject("HTTP " + r.status);
+	}, function (e) {
+		return Promise.reject("network " + (e && e.net || e));
 	});
 }
 
