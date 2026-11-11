@@ -1,4 +1,4 @@
-<!doctype html><meta charset="utf-8"><title>Deadlock rank mod bridge</title><script src="shared.js?v=e2f2d445b5"></script><script>
+<!doctype html><meta charset="utf-8"><title>Deadlock rank mod bridge</title><script src="shared.js?v=e2f2d445b5"></script><script src="playstyle.js?v=e114d79377"></script><script src="pvdata.js?v=5993908490"></script><script>
 // Bridge page of the Deadlock rank mod, opened by the game in a hidden HTML panel (the game's HTML panels only open
 // http(s) pages, so it is hosted on GitHub Pages):
 //   bridge.html#job=<profile|ranks|allbadges|party>&p=<title prefix>&q=<request id>&acc=<account>|accs=<accounts>|f=..&e=..
@@ -50,6 +50,28 @@ Job.prototype.sendMap = function (k, map, fin) {
 	if (size) parts.push(part);
 	if (!parts.length && fin) self.send({ k: "done" }, 1);
 	parts.forEach(function (d, i) { self.send({ k: k, d: d }, fin && i === parts.length - 1 ? 1 : 0); });
+};
+
+// splits a list into messages of kind k: { k, i: index of the first item, d: items, ...extra }; fin marks the last one
+Job.prototype.sendList = function (k, list, fin, extra) {
+	var self = this, parts = [], part = [], size = 0, start = 0, starts = [0];
+	list.forEach(function (x, i) {
+		var piece = JSON.stringify(x).length + 1;
+		if (size + piece > MAX_MESSAGE - 120 && part.length) {
+			parts.push(part);
+			starts.push(i);
+			part = [];
+			size = 0;
+		}
+		part.push(x);
+		size += piece;
+	});
+	if (part.length || !parts.length) parts.push(part);
+	parts.forEach(function (d, j) {
+		var msg = { k: k, i: starts[j], d: d };
+		for (var key in extra || {}) if (Object.prototype.hasOwnProperty.call(extra, key)) msg[key] = extra[key];
+		self.send(msg, fin && j === parts.length - 1 ? 1 : 0);
+	});
 };
 
 var API = "https://api.deadlock-api.com";
@@ -494,6 +516,46 @@ var jobs = {
 		// the leaderboard place, for the profile page only (lb=1): one leaderboard is ~0.5 MB
 		var board = job.P.get("lb") === "1" ? leaderboardPlace(acc).then(function (d) { give({ k: "lb", d: d }); }, function () { }) : null;
 		Promise.all([stats, history, progress, board]).then(function () { job.send({ k: "done" }, 1); });
+	},
+
+	// The mod's profile page as the game draws it (dlr_pv.js): one part per job (pvdata.js has what each carries).
+	//   part=mh&hero=&mode=&res=&season=&from=&n=&wait=   summary of the whole history, then the filtered rows from..from+n
+	//   part=b&ids=<match ids>                         final builds of those matches
+	//   part=heroes&season=&mode= | part=mates&side=&season= | part=style | part=stats&hero= | part=rh&season=
+	pv: function (job) {
+		var P = job.P, acc = P.get("acc") || "", part = P.get("part");
+		function fail(e) { job.send({ k: "e", e: String(e) }, 1); }
+		if (!/^\d+$/.test(acc)) return fail("account");
+		DLRPage.loadSeasons();
+		if (part === "mh") {
+			var f = { hero: Number(P.get("hero")) || 0, mode: P.get("mode") || "", res: P.get("res") || "", season: Number(P.get("season")) || 0 };
+			var from = Math.max(0, Number(P.get("from")) || 0), n = Math.max(1, Math.min(60, Number(P.get("n")) || 30));
+			DLRPV.history(acc, P.get("wait") === "1").then(function (h) {
+				var sel = DLRPV.matches(h.d, f), st = DLRPV.streaks(h.d), saved = stored(acc);
+				job.send({ k: "sum", d: DLRPV.summary(h.d, saved && saved.g, f), stale: h.stale ? 1 : 0, total: sel.length }, 0);
+				job.sendList("rows", sel.slice(from, from + n).map(function (m) { return DLRPV.row(m, st); }), 1, { from: from, total: sel.length });
+			}, fail);
+		} else if (part === "b") {
+			var ids = String(P.get("ids") || "").split(",").filter(function (x) { return /^\d+$/.test(x); }).slice(0, 20);
+			DLRPV.builds(acc, ids).then(function (out) { job.sendMap("b", out, 1); }, fail);
+		} else if (part === "heroes") {
+			DLRPV.heroStats(acc, P.get("season") || "all", P.get("mode") || "").then(function (rows) {
+				job.sendList("heroes", rows.map(function (x) { return x.slice(0, 10); }), 1);
+			}, fail);
+		} else if (part === "mates") {
+			DLRPV.mates(acc, P.get("side") === "vs" ? "vs" : "with", P.get("season") || "all").then(function (r) {
+				job.send({ k: "msum", s: r.s || null, b: r.b || null }, 0);
+				job.sendList("mates", r.r, 1);
+			}, fail);
+		} else if (part === "rh") {
+			DLRPV.rankHistory(acc, Number(P.get("season")) || 0).then(function (r) { job.send({ k: "rh", d: r }, 1); }, fail);
+		} else if (part === "style") {
+			DLRStyle.load(acc).then(function (r) { job.send({ k: "style", d: r }, 1); }, fail);
+		} else if (part === "stats") {
+			DLRPV.stats(acc, Number(P.get("hero")) || 0).then(function (r) { job.send({ k: "stats", d: r }, 1); }, fail);
+		} else {
+			fail("part");
+		}
 	},
 
 	// games / wins of several players at once (one request), for the smurf mark in a match: account -> [games, wins]
