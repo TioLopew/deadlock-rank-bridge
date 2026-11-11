@@ -70,8 +70,9 @@
 		for (var v in vars || {}) if (Object.prototype.hasOwnProperty.call(vars, v)) s = s.split("{" + v + "}").join(vars[v]);
 		return s;
 	}
-	var TIERS_FALLBACK = RU ? "Без ранга,Инициат,Искатель,Алхимик,Арканист,Ритуалист,Эмиссар,Архонт,Оракул,Фантом,Вознесённый,Этернус"
-		: "Obscurus,Initiate,Seeker,Alchemist,Arcanist,Ritualist,Emissary,Archon,Oracle,Phantom,Ascendant,Eternus";
+	// the game's new tier names (its #Citadel_ranks_<t>), for when the game gave none
+	var TIERS_FALLBACK = RU ? "Обскурус,Послушник,Искатель,Аколит,Страж,Мистик,Ритуалист,Эмиссар,Оракул,Фантом,Владыка,Этернус"
+		: "Obscurus,Initiate,Seeker,Acolyte,Sentinel,Mystic,Ritualist,Emissary,Oracle,Phantom,Ascendant,Eternus";
 	function tierName(t) {
 		return TIER_NAMES[t] || TIERS_FALLBACK.split(",")[t] || "";
 	}
