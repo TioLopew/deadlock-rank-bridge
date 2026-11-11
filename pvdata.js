@@ -312,7 +312,8 @@ var DLRPV = (function () {
 					});
 					out.s = s;
 					var best = rows.filter(function (x) { return x[2] >= 10; }).sort(function (a, b) { return b[3] / b[2] - a[3] / a[2]; })[0];
-					out.b = best ? [best[1], best[2], best[3]] : null;
+					// [name, games, wins, account]
+					out.b = best ? [best[1], best[2], best[3], best[0]] : null;
 				}
 				return out;
 			});
@@ -341,12 +342,13 @@ var DLRPV = (function () {
 			for (var i = 0; i < mine.length; i += step) out.push(mine[Math.floor(i)]);
 			if (mine.length && out[out.length - 1] !== mine[mine.length - 1]) out.push(mine[mine.length - 1]);
 			// the season's ranked numbers: [games, wins, kills, deaths, assists, rank points won in all, longest win streak,
-			// rank points of the best match]
-			var st = [0, 0, 0, 0, 0, 0, 0, 0], run = 0;
+			// rank points of the best match, longest loss streak, the streak now (+wins / -losses in a row)]
+			var st = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], run = 0, lost = 0;
 			r[0].d.filter(function (m) { return m[M.mode] === 4 && m[M.t] && DLRPage.seasonAt(m[M.t]).n === cur; })
 				.sort(function (x, y) { return x[M.t] - y[M.t]; }).forEach(function (m) {
 					st[0]++;
-					if (m[M.win]) { st[1]++; run++; if (run > st[6]) st[6] = run; } else run = 0;
+					if (m[M.win]) { st[1]++; run++; lost = 0; if (run > st[6]) st[6] = run; } else { lost++; run = 0; if (lost > st[8]) st[8] = lost; }
+					st[9] = run ? run : -lost;
 					st[2] += m[M.k] || 0; st[3] += m[M.d] || 0; st[4] += m[M.a] || 0;
 					st[5] += m[M.delta] || 0;
 					if ((m[M.delta] || 0) > st[7]) st[7] = m[M.delta];
