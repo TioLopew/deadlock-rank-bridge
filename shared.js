@@ -46,73 +46,112 @@ var DLRPage = (function () {
 		try { return Math.max(0, Number(JSON.parse(localStorage.getItem(COOLDOWN_PREFIX + family) || "0")) - Date.now()); } catch (e) { return 0; }
 	}
 
-	// ---------- the mirror ----------
-	// Some Russian internet providers cut connections to Cloudflare (deadlock-api's host) after the first ~16 KB: small
-	// answers come, bigger ones stall or break. A request that fails that way (no answer, a network error, a broken or
-	// stalled body) goes again through the mod's mirror of deadlock-api (a proxy on Vercel, mirror/ in the mod's
-	// sources: the same paths, the same answers), and the page keeps to the mirror for a while (VIA_MS, in its storage).
-	// An HTTP answer (429, 404, 5xx) is an answer: no mirror for it.
-	var MIRROR = "https://deadlock-rank-mirror.vercel.app";
-	var VIA_KEY = "dlr_via_mirror", VIA_MS = 6 * 3600 * 1000;
-	var DIRECT_MS = 12000, MIRROR_MS = 25000;
+	// ---------- the ways to deadlock-api ----------
+	// Some Russian providers cut connections to Cloudflare (deadlock-api's host) after the first ~16 KB, some block
+	// foreign hosts or their names outright. So deadlock-api is reached one of several ways, the same paths and answers
+	// each: straight; the mod's gateway in Yandex Cloud (GATEWAY, yc/ in the mod's sources: reachable from Russia, it
+	// also serves this very page for players GitHub Pages fails for); the mod's mirror on Vercel (mirror/). A request
+	// that gets no whole answer one way (network error, no answer, a stalled body) goes the next way, and the page keeps
+	// to the way that worked for a while (VIA_MS, in its storage). An HTTP answer (429, 404, 5xx) is an answer: no other
+	// way for it. A page served by the gateway itself goes through it (same site) first.
+	var GATEWAY = /*GATEWAY*/"";
+	var VERCEL = "https://deadlock-rank-mirror.vercel.app";
+	var SELF = typeof location !== "undefined" && location && /\.apigw\.yandexcloud\.net$/.test(location.host || "") ? location.protocol + "//" + location.host : "";
+	// the gateway passes /v1/... to deadlock-api, and /v/v1/... to the Vercel mirror (should its own way to Cloudflare be
+	// cut as well)
+	var WAYS = (SELF ? [SELF, API, SELF + "/v", VERCEL] : [API, GATEWAY, GATEWAY && GATEWAY + "/v", VERCEL]).filter(function (w, i, all) { return w && all.indexOf(w) === i; });
+	var VIA_KEY = "dlr_via", VIA_MS = 6 * 3600 * 1000;
+	// no answer at all by FIRST_MS, or no new data of the body for IDLE_MS: that way is cut; a slow but moving download
+	// goes on (a big match history takes long on a slow line)
+	var FIRST_MS = 10000, IDLE_MS = 10000, MAX_MS = 120000;
 
-	function viaMirror() {
-		if (!MIRROR) return false;
-		try { return Date.now() - Number(localStorage.getItem(VIA_KEY) || 0) < VIA_MS; } catch (e) { return false; }
+	function viaWay() {
+		try {
+			var v = JSON.parse(localStorage.getItem(VIA_KEY) || "null");
+			return v && Date.now() - v.t < VIA_MS && WAYS.indexOf(v.w) > 0 ? v.w : "";
+		} catch (e) { return ""; }
 	}
 
-	function useMirror(on) {
+	function keepWay(w) {
 		try {
-			if (on) localStorage.setItem(VIA_KEY, String(Date.now()));
+			if (w && w !== WAYS[0]) localStorage.setItem(VIA_KEY, JSON.stringify({ w: w, t: Date.now() }));
 			else localStorage.removeItem(VIA_KEY);
 		} catch (e) { }
 	}
 
-	// { status, headers, data } of an answer (data: its json when ok); rejects { net } when no whole answer came in ms
-	function fetchJson(url, ms) {
+	// { status, headers, data } of an answer (data: its json when ok); rejects { net } when no whole answer came
+	function fetchJson(url) {
 		return new Promise(function (resolve, reject) {
-			var over = false, ctl = null;
+			var over = false, ctl = null, timer = null, started = Date.now();
 			try { ctl = typeof AbortController === "function" ? new AbortController() : null; } catch (e) { ctl = null; }
-			var timer = typeof setTimeout === "function" ? setTimeout(function () {
+			function fail(why) {
+				if (over) return;
 				over = true;
+				stop();
 				try { if (ctl) ctl.abort(); } catch (e) { }
-				reject({ net: "timeout" });
-			}, ms) : null;
+				reject({ net: why });
+			}
 			function stop() {
 				try { if (timer !== null) clearTimeout(timer); } catch (e) { }
+				timer = null;
 			}
-			fetch(url, ctl ? { signal: ctl.signal } : undefined).then(function (r) {
-				if (!r.ok) return { status: r.status, headers: r.headers, data: null };
-				// the body is where a cut connection stalls: it is inside the same time limit
-				return r.json().then(function (d) { return { status: r.status, headers: r.headers, data: d }; });
-			}).then(function (x) {
+			function wait(ms, why) {
+				stop();
+				if (typeof setTimeout === "function" && typeof clearTimeout === "function") timer = setTimeout(function () { fail(why); }, Math.min(ms, Math.max(1, MAX_MS - (Date.now() - started))));
+			}
+			function done(x) {
 				if (over) return;
+				over = true;
 				stop();
 				resolve(x);
-			}, function (e) {
+			}
+			wait(FIRST_MS, "no answer");
+			fetch(url, ctl ? { signal: ctl.signal } : undefined).then(function (r) {
 				if (over) return;
-				stop();
-				reject({ net: String(e && e.message || e) });
-			});
+				if (!r.ok) return done({ status: r.status, headers: r.headers, data: null });
+				var reader = null;
+				try { reader = r.body && typeof r.body.getReader === "function" && typeof TextDecoder === "function" ? r.body.getReader() : null; } catch (e) { reader = null; }
+				if (!reader) {
+					// no stream to watch: the whole body within the time left
+					wait(MAX_MS, "stalled");
+					return r.json().then(function (d) { done({ status: r.status, headers: r.headers, data: d }); }, function (e) { fail("body: " + e); });
+				}
+				var dec = new TextDecoder(), text = "";
+				wait(IDLE_MS, "stalled");
+				function pump() {
+					return reader.read().then(function (c) {
+						if (over) return;
+						if (c.done) {
+							text += dec.decode();
+							var d;
+							try { d = JSON.parse(text); } catch (e) { return fail("broken body"); }
+							return done({ status: r.status, headers: r.headers, data: d });
+						}
+						text += dec.decode(c.value, { stream: true });
+						wait(IDLE_MS, "stalled");
+						return pump();
+					}, function (e) { fail("body: " + (e && e.message || e)); });
+				}
+				return pump();
+			}).catch(function (e) { fail(String(e && e.message || e)); });
 		});
 	}
 
-	// deadlock-api, straight or through the mirror
+	// deadlock-api: the kept way first, then each way in order
 	function apiFetch(path) {
-		if (viaMirror()) {
-			return fetchJson(MIRROR + path, MIRROR_MS).catch(function () {
-				// the mirror is down: straight again (and the mirror only after that fails)
-				useMirror(false);
-				return fetchJson(API + path, DIRECT_MS);
-			});
-		}
-		return fetchJson(API + path, DIRECT_MS).catch(function (e) {
-			if (!MIRROR) return Promise.reject(e);
-			return fetchJson(MIRROR + path, MIRROR_MS).then(function (x) {
-				useMirror(true);
+		var kept = viaWay(), order = kept ? [kept].concat(WAYS.filter(function (w) { return w !== kept; })) : WAYS.slice();
+		function from(i, last) {
+			if (i >= order.length) return Promise.reject(last || { net: "no way" });
+			return fetchJson(order[i] + path).then(function (x) {
+				if (i > 0 || kept) keepWay(order[i]);
 				return x;
-			});
-		});
+			}, function (e) { return from(i + 1, e); });
+		}
+		return from(0);
+	}
+
+	function viaMirror() {
+		return !!viaWay();
 	}
 
 	function get(path, family) {
@@ -319,7 +358,7 @@ var DLRPage = (function () {
 	}
 
 	return {
-		params: params, tell: tell, esc: esc, read: read, write: write, get: get, apiFetch: apiFetch, viaMirror: viaMirror, KEEP_MS: KEEP_MS,
+		params: params, tell: tell, esc: esc, read: read, write: write, get: get, apiFetch: apiFetch, viaMirror: viaMirror, viaWay: viaWay, WAYS: WAYS, KEEP_MS: KEEP_MS,
 		MAX_TIER: MAX_TIER, COLORS: COLORS, ROMAN: ROMAN, split: split, progress: progress, curve: curve,
 		seasons: seasons, loadSeasons: loadSeasons, seasonAt: seasonAt, range: range, parseSeasons: parseSeasons,
 		monotonePath: monotonePath, lift: lift, r2: r2, message: message
