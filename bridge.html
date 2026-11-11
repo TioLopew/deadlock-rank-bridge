@@ -1,12 +1,13 @@
-<!doctype html><meta charset="utf-8"><title>Deadlock rank mod bridge</title><script src="shared.js?v=2"></script><script>
+<!doctype html><meta charset="utf-8"><title>Deadlock rank mod bridge</title><script src="shared.js?v=3"></script><script>
 // Bridge page of the Deadlock rank mod, opened by the game in a hidden HTML panel (the game's HTML panels only open
 // http(s) pages, so it is hosted on GitHub Pages):
 //   bridge.html#job=<profile|ranks|allbadges|party>&p=<title prefix>&q=<request id>&acc=<account>|accs=<accounts>|f=..&e=..
 // The page stays loaded between jobs: the game only changes the part after "#" and the next job starts at once.
 // Data comes from deadlock-api; results go back to Panorama through document.title, one short message at a time.
-// Ranked seasons (rank points scale, which season is on) come from shared.js. A job with sz=1 (mod builds that know
-// seasons) gets a badge whose player has no ranked match in the current season yet as badge + 1000 ("last season's"),
-// older builds get the plain badge.
+// Ranked seasons (rank points scale, which season is on) come from shared.js. Badges go out as a code: a job with
+// sz=1 (mod builds that know seasons) gets a badge whose player has no ranked match in the current season yet as
+// badge + 1000 ("last season's"); with sz=2 also + 10000 * the ranked win streak (current season only). Older builds
+// get the plain badge.
 var MAX_MESSAGE = 1800;
 var SPACING_MS = 250;   // time between two titles, so the game sees every one of them
 var queue = [], busy = false, seq = 0, current = null;
@@ -148,15 +149,27 @@ function store(acc, e) {
 var BADGE_PREFIX = "dlr_badge_";
 var OLD_SEASON = 1000;
 
+var STREAK = 10000;
+
+// the ranked win streak after the latest ranked match of a /rank answer: the streak it started with, + 1 for a win
+function winStreak(r) {
+	var m = r && r.last_match;
+	if (!m || typeof m.player_rank_initial_win_streak !== "number") return 0;
+	return (m.player_rank_desired_progress_change || 0) > 0 ? Math.min(99, m.player_rank_initial_win_streak + 1) : 0;
+}
+
 // whether a /rank answer's badge is from before the current season
 function oldSeason(r) {
 	var t = r && r.last_match && r.last_match.start_time;
 	return !!(r && r.badge > 0 && t && t < DLRPage.seasonAt(Date.now() / 1000).start);
 }
 
-// the badge as a job gets it: with sz, an earlier season's badge + OLD_SEASON
-function badgeFor(job, badge, old) {
-	return job.P.get("sz") === "1" && old && badge > 0 ? badge + OLD_SEASON : badge;
+// the badge as a job gets it: with sz >= 1 an earlier season's badge + OLD_SEASON, with sz >= 2 also the streak
+function badgeFor(job, badge, old, streak) {
+	var sz = Number(job.P.get("sz")) || 0;
+	if (!(badge > 0) || !sz) return badge;
+	if (old) return badge + OLD_SEASON;
+	return badge + (sz >= 2 && streak > 0 ? streak * STREAK : 0);
 }
 
 function storedBadge(acc) {
@@ -168,8 +181,9 @@ function storedBadge(acc) {
 	}
 }
 
-function storeBadge(acc, badge, old) {
-	try { localStorage.setItem(BADGE_PREFIX + acc, JSON.stringify([badge, Date.now(), old ? 1 : 0])); } catch (x) { }
+// [badge, time, old season, win streak]
+function storeBadge(acc, badge, old, streak) {
+	try { localStorage.setItem(BADGE_PREFIX + acc, JSON.stringify([badge, Date.now(), old ? 1 : 0, streak || 0])); } catch (x) { }
 }
 
 // every key of the browser storage that starts with prefix, without the prefix
@@ -221,6 +235,102 @@ function rankPoints(matches) {
 		out.push([m.start_time, m.ranked_display_badge, typeof m.ranked_delta === "number" ? m.ranked_delta : 0]);
 	});
 	return out.sort(function (a, b) { return a[0] - b[0]; });
+}
+
+// [best badge, season number] of the newest season in points ([[time, badge, gain], ...], oldest first), or null
+function peak(points) {
+	if (!points.length) return null;
+	var season = DLRPage.seasonAt(points[points.length - 1][0]), best = 0;
+	points.forEach(function (p) { if (DLRPage.seasonAt(p[0]) === season && p[1] > best) best = p[1]; });
+	return best > 0 ? [best, season.n] : null;
+}
+
+// ---------- leaderboard ----------
+// Valve's leaderboards are per region (deadlock-api: Europe, Asia, NAmerica, SAmerica, Oceania) and per season; an
+// entry has a name and the accounts it may be (possible_account_ids). The player's region is the one they played most
+// in lately (/region, kept a week). The place is looked for in the current season's board, else in the one before.
+// The answer per player is kept an hour: [place, region, season number], or null.
+var LB_PREFIX = "dlr_lb_", REGION_PREFIX = "dlr_region_";
+var LB_KEEP_MS = 3600 * 1000, REGION_KEEP_MS = 7 * 24 * 3600 * 1000;
+var boards = {};   // region|leaderboard id -> { at, entries } while the page stays loaded
+
+function boardRegion(server) {
+	var s = String(server || "");
+	if (/^(eu|europe|south_africa)/.test(s)) return "Europe";
+	if (/^us/.test(s)) return "NAmerica";
+	if (/^(chile|peru|argentina|south_america|brazil)/.test(s)) return "SAmerica";
+	if (/^(australia|oceania)/.test(s)) return "Oceania";
+	if (/^(singapore|japan|hong_kong|mp_hong_kong|seoul|asia|india|china)/.test(s)) return "Asia";
+	return "";
+}
+
+function readKept(key, ttl) {
+	try {
+		var e = JSON.parse(localStorage.getItem(key) || "null");
+		return e && Date.now() - e.at < ttl ? e : null;
+	} catch (x) {
+		return null;
+	}
+}
+
+function keepValue(key, value) {
+	try { localStorage.setItem(key, JSON.stringify({ at: Date.now(), v: value })); } catch (x) { }
+}
+
+function board(region, id) {
+	var key = region + "|" + id, b = boards[key];
+	if (b && Date.now() - b.at < LB_KEEP_MS) return Promise.resolve(b.entries);
+	return get("/v1/leaderboard/" + region + (id ? "?leaderboard_id=" + id : ""), "lb").then(function (d) {
+		var entries = (d && d.entries) || [];
+		boards[key] = { at: Date.now(), entries: entries };
+		return entries;
+	});
+}
+
+function placeIn(entries, acc) {
+	var n = Number(acc);
+	for (var i = 0; i < entries.length; i++) if ((entries[i].possible_account_ids || []).indexOf(n) >= 0) return entries[i].rank;
+	return 0;
+}
+
+function leaderboardPlace(acc) {
+	var kept = readKept(LB_PREFIX + acc, LB_KEEP_MS);
+	if (kept) return Promise.resolve(kept.v);
+	var region = readKept(REGION_PREFIX + acc, REGION_KEEP_MS);
+	var regionLoad = region ? Promise.resolve(region.v) : get("/v1/players/" + acc + "/region", "region").then(function (r) {
+		var v = boardRegion(r && r.region);
+		keepValue(REGION_PREFIX + acc, v);
+		return v;
+	});
+	return regionLoad.then(function (reg) {
+		if (!reg) return null;
+		var list = DLRPage.seasons(), cur = DLRPage.seasonAt(Date.now() / 1000), i = list.indexOf(cur);
+		var prev = i > 0 ? list[i - 1] : null;
+		return board(reg, cur.lb || 0).then(function (entries) {
+			var place = placeIn(entries, acc);
+			if (place) return [place, reg, cur.n];
+			if (!prev || !prev.lb) return null;
+			return board(reg, prev.lb).then(function (old) {
+				var pl = placeIn(old, acc);
+				return pl ? [pl, reg, prev.n] : null;
+			});
+		});
+	}).then(function (v) {
+		keepValue(LB_PREFIX + acc, v);
+		return v;
+	});
+}
+
+// ---------- settings ----------
+var CFG_KEY = "dlr_cfg";
+
+function storedCfg() {
+	try {
+		var e = JSON.parse(localStorage.getItem(CFG_KEY) || "null");
+		return e && e.c ? e.c : {};
+	} catch (x) {
+		return {};
+	}
 }
 
 // now and then drop players, badges and histories nobody looked at for a long time
@@ -281,9 +391,9 @@ function freshRanks(job, accs, known) {
 		.then(function (list) {
 			var fresh = {};
 			list.forEach(function (r) {
-				var badge = typeof r.badge === "number" ? r.badge : 0, old = oldSeason(r);
-				storeBadge(r.account_id, badge, old);
-				badge = badgeFor(job, badge, old);
+				var badge = typeof r.badge === "number" ? r.badge : 0, old = oldSeason(r), streak = winStreak(r);
+				storeBadge(r.account_id, badge, old, streak);
+				badge = badgeFor(job, badge, old, streak);
 				if (known[r.account_id] !== badge) fresh[r.account_id] = badge;
 			});
 			job.sendMap("r", fresh, 1);
@@ -311,6 +421,7 @@ var jobs = {
 		if (saved.t) give({ k: "t", d: saved.t, full: saved.full });
 		if (saved.p) give({ k: "p", d: saved.p });
 		if (saved.g) give({ k: "g", d: saved.g });
+		if (saved.pk) give({ k: "pk", d: saved.pk });
 		if (oldHistory) give({ k: "h", d: oldHistory.p.length });
 		if (!saved.t && !saved.p && !saved.g) job.send({ k: "hi" }, 0);
 		// rank progress: badge and rank points after the latest ranked match
@@ -320,8 +431,10 @@ var jobs = {
 			// [badge, rank points, points into the subrank, points the subrank takes (both in the season of the
 			// latest ranked match; null for Eternus), 1 if that match is from an earlier season, its season number]
 			var t = r.last_match && r.last_match.start_time, old = oldSeason(r), pr = DLRPage.progress(r.badge, fp, t);
-			saved.g = [r.badge, fp, pr ? pr.pts : null, pr ? pr.need : null, old ? 1 : 0, t ? DLRPage.seasonAt(t).n : 0];
-			storeBadge(acc, r.badge, old);
+			var streak = old ? 0 : winStreak(r);
+			// [.., win streak (current season)]
+			saved.g = [r.badge, fp, pr ? pr.pts : null, pr ? pr.need : null, old ? 1 : 0, t ? DLRPage.seasonAt(t).n : 0, streak];
+			storeBadge(acc, r.badge, old, streak);
 			store(acc, saved);
 			give({ k: "g", d: saved.g });
 		}, function () { });
@@ -370,8 +483,50 @@ var jobs = {
 			var points = rankPoints(all);
 			storeHistory(acc, points);
 			give({ k: "h", d: points.length });
+			// the best badge of the newest season the player has ranked matches in: [badge, season number]
+			var pk = peak(points);
+			if (pk) {
+				saved.pk = pk;
+				store(acc, saved);
+				give({ k: "pk", d: pk });
+			}
 		}, function () { });
-		Promise.all([stats, history, progress]).then(function () { job.send({ k: "done" }, 1); });
+		// the leaderboard place, for the profile page only (lb=1): one leaderboard is ~0.5 MB
+		var board = job.P.get("lb") === "1" ? leaderboardPlace(acc).then(function (d) { give({ k: "lb", d: d }); }, function () { }) : null;
+		Promise.all([stats, history, progress, board]).then(function () { job.send({ k: "done" }, 1); });
+	},
+
+	// games / wins of several players at once (one request), for the smurf mark in a match: account -> [games, wins]
+	meta: function (job) {
+		var accs = accounts(job);
+		if (!accs.length) return job.send({ k: "done" }, 1);
+		job.send({ k: "hi" }, 0);
+		get("/v1/players/hero-stats?account_ids=" + accs.join(",") + "&game_mode=normal", "meta")
+			.then(function (list) {
+				var out = {};
+				accs.forEach(function (a) { out[a] = [0, 0]; });
+				(list || []).forEach(function (h) {
+					var e = out[h.account_id];
+					if (!e) return;
+					e[0] += h.matches_played || 0;
+					e[1] += h.wins || 0;
+				});
+				job.sendMap("m", out, 1);
+			})
+			.catch(function (e) { job.send({ k: "e", e: String(e) }, 1); });
+	},
+
+	// the mod's settings (switches), kept in this browser's storage: cfg sends them, setcfg (c: JSON) keeps new ones
+	cfg: function (job) {
+		job.send({ k: "cfg", d: storedCfg() }, 1);
+	},
+	setcfg: function (job) {
+		var c = {};
+		try { c = JSON.parse(job.P.get("c") || "{}") || {}; } catch (x) { c = {}; }
+		var kept = {};
+		Object.keys(c).forEach(function (k) { if (/^[a-z]{1,16}$/.test(k) && typeof c[k] === "boolean") kept[k] = c[k]; });
+		try { localStorage.setItem(CFG_KEY, JSON.stringify({ at: Date.now(), c: kept })); } catch (x) { }
+		job.send({ k: "cfg", d: kept }, 1);
 	},
 
 	// Steam friends grouped per team of a match (f / e: the two teams' accounts), for the party markers. The same
@@ -402,7 +557,7 @@ var jobs = {
 		var accs = accounts(job), known = {};
 		accs.forEach(function (a) {
 			var e = storedBadge(a);
-			if (e) known[a] = badgeFor(job, e[0], e[2] !== 0);
+			if (e) known[a] = badgeFor(job, e[0], e[2] !== 0, e[3] || 0);
 		});
 		if (Math.random() < 0.05) prune();
 		if (Object.keys(known).length) job.sendMap("r", known, 0);
@@ -415,10 +570,12 @@ var jobs = {
 	// then on: a screen catching up with what other screens looked up meanwhile. Accounts in accs are looked up fresh.
 	allbadges: function (job) {
 		var now = Date.now(), items = [], accs = accounts(job), since = Number(job.P.get("since")) || 0;
+		// mod builds with settings (sz=2) get them along with the badges
+		if (Number(job.P.get("sz")) >= 2) job.send({ k: "cfg", d: storedCfg() }, 0);
 		storedKeys(BADGE_PREFIX).forEach(function (acc) {
 			var e = storedBadge(acc);
 			// without a season flag (kept before seasons were known) it goes out as hours old: looked up again soon
-			if (e && e[1] >= since) items.push([acc, badgeFor(job, e[0], e[2] !== 0), e.length > 2 ? now - e[1] : Math.max(now - e[1], 4 * 3600 * 1000)]);
+			if (e && e[1] >= since) items.push([acc, badgeFor(job, e[0], e[2] !== 0, e[3] || 0), e.length > 2 ? now - e[1] : Math.max(now - e[1], 4 * 3600 * 1000)]);
 		});
 		items.sort(function (a, b) { return a[2] - b[2]; });
 		var parts = [], cur = "", known = {};
