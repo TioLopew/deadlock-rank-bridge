@@ -1,4 +1,4 @@
-<!doctype html><meta charset="utf-8"><title>Deadlock rank mod bridge</title><script src="shared.js?v=da2c788e39"></script><script src="playstyle.js?v=e114d79377"></script><script src="pvdata.js?v=f163b148a0"></script><script>
+<!doctype html><meta charset="utf-8"><title>Deadlock rank mod bridge</title><script src="shared.js?v=da2c788e39"></script><script src="playstyle.js?v=e114d79377"></script><script src="pvdata.js?v=8f25fec364"></script><script>
 // Bridge page of the Deadlock rank mod, opened by the game in a hidden HTML panel (the game's HTML panels only open
 // http(s) pages, so it is hosted on GitHub Pages):
 //   bridge.html#job=<profile|ranks|allbadges|party>&p=<title prefix>&q=<request id>&acc=<account>|accs=<accounts>|f=..&e=..
@@ -153,6 +153,7 @@ function round(x, digits) {
 // also after a game restart
 var STORE_PREFIX = "dlr_player_";
 var STORE_KEEP_MS = 60 * 24 * 3600 * 1000;
+var PROFILE_MH_FRESH_MS = 15 * 60 * 1000;
 
 function stored(acc) {
 	try {
@@ -252,12 +253,13 @@ function storeHistory(acc, points) {
 }
 
 // ranked matches with a badge, one per match, oldest first: [start time, badge, rank points it gave]
+// (from the kept history, DLRPV's compact rows)
 function rankPoints(matches) {
-	var seen = {}, out = [];
+	var seen = {}, out = [], M = DLRPV.M;
 	matches.forEach(function (m) {
-		if (m.match_mode != 4 || !(m.ranked_display_badge > 0) || !m.start_time || seen[m.match_id]) return;
-		seen[m.match_id] = 1;
-		out.push([m.start_time, m.ranked_display_badge, typeof m.ranked_delta === "number" ? m.ranked_delta : 0]);
+		if (m[M.mode] !== 4 || !(m[M.badge] > 0) || !m[M.t] || seen[m[M.id]]) return;
+		seen[m[M.id]] = 1;
+		out.push([m[M.t], m[M.badge], typeof m[M.delta] === "number" ? m[M.delta] : 0]);
 	});
 	return out.sort(function (a, b) { return a[0] - b[0]; });
 }
@@ -492,13 +494,15 @@ var jobs = {
 			store(acc, saved);
 			give({ k: "p", d: saved.p });
 		});
-		var history = get("/v1/players/" + acc + "/match-history").then(function (all) {
-			var t = [0, 0, 0];
+		// the history the mod's profile page keeps on disk too (one taken in the last PROFILE_MH_FRESH_MS counts as
+		// fresh, so a player met again soon costs no look-up, and his profile opens at once)
+		var history = DLRPV.history(acc, true, PROFILE_MH_FRESH_MS).then(function (h) {
+			var all = h.d, M = DLRPV.M, t = [0, 0, 0];
 			all.forEach(function (m) {
-				if (m.game_mode != 1 || [1, 4, 8].indexOf(m.match_mode) < 0) return;
+				if (!DLRPV.counted(m)) return;
 				t[0]++;
-				t[1] += m.player_team == m.match_result ? 1 : 0;
-				t[2] += m.last_hits || 0;
+				t[1] += m[M.win] ? 1 : 0;
+				t[2] += m[M.lh] || 0;
 			});
 			full = true;
 			saved.t = t;
