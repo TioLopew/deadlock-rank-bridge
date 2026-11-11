@@ -19,10 +19,12 @@ var DLRPV = (function () {
 	// compact, newest first: [match id, hero, start, duration s, match mode, game mode, win, k, d, a, souls, last hits,
 	// denies, rank gain, badge, placement match, demotion protection used, left the match]
 	var M = { id: 0, hero: 1, t: 2, dur: 3, mode: 4, gmode: 5, win: 6, k: 7, d: 8, a: 9, nw: 10, lh: 11, dn: 12, delta: 13, badge: 14, cal: 15, prot: 16, left: 17 };
-	// the players looked at last keep theirs (the same entries profile.html keeps): up to MH_KEEP of them within
-	// MH_BUDGET characters of storage, the oldest go first. A kept one shows at once (then the fresh one replaces it)
-	// for MH_MAX_MS; within MH_FRESH_MS it is not asked again.
-	var MH_PREFIX = "dlr_pv_mh_", MH_KEEP = 16, MH_BUDGET = 2500000, MH_FRESH_MS = 45 * 1000, MH_MAX_MS = 30 * DAYMS;
+	// Kept histories live on disk, in this browser's IndexedDB (DB_KEEP players, the ones not seen the longest go
+	// first: a few hundred kB each at most); a browser without it keeps them in localStorage as before (up to MH_KEEP
+	// within MH_BUDGET characters, the same entries profile.html keeps). A kept one shows at once (then the fresh one
+	// replaces it) for MH_MAX_MS; within MH_FRESH_MS it is not asked again.
+	var MH_PREFIX = "dlr_pv_mh_", MH_KEEP = 16, MH_BUDGET = 2500000, MH_FRESH_MS = 45 * 1000, MH_MAX_MS = 90 * DAYMS;
+	var DB_NAME = "dlr", DB_STORE = "mh", DB_KEEP = 400, MEM_KEEP = 4;
 
 	function compact(list) {
 		var seen = {}, out = [];
@@ -54,7 +56,103 @@ var DLRPV = (function () {
 		return out.sort(function (a, b) { return a[1] - b[1]; });
 	}
 
+	// ---------- disk (IndexedDB) ----------
+	var IDB = null;
+	try { IDB = typeof indexedDB !== "undefined" && indexedDB ? indexedDB : null; } catch (e) { IDB = null; }
+	var dbWait = null;
+	// the database, or null when this browser cannot open it (then localStorage it is)
+	function db() {
+		if (!IDB) return Promise.resolve(null);
+		if (!dbWait) {
+			dbWait = new Promise(function (ok) {
+				var rq;
+				try { rq = IDB.open(DB_NAME, 1); } catch (e) { return ok(null); }
+				rq.onupgradeneeded = function () {
+					try { rq.result.createObjectStore(DB_STORE).createIndex("at", "at"); } catch (e) { }
+				};
+				rq.onsuccess = function () { ok(rq.result); };
+				rq.onerror = rq.onblocked = function () { ok(null); };
+			});
+			dbWait.then(function (d) { if (!d) IDB = null; });
+		}
+		return dbWait;
+	}
+	// a request's answer (null on any failure)
+	function req(store, mode, fn) {
+		return db().then(function (d) {
+			if (!d) return null;
+			return new Promise(function (ok) {
+				try {
+					var tx = d.transaction(DB_STORE, mode), r = fn(tx.objectStore(DB_STORE), tx);
+					tx.oncomplete = function () { ok(r && "result" in r ? r.result : true); };
+					tx.onerror = tx.onabort = function () { ok(null); };
+				} catch (e) { ok(null); }
+			});
+		});
+	}
+	// past DB_KEEP players, the ones kept the longest ago go
+	function diskTrim() {
+		return req(DB_STORE, "readwrite", function (s) {
+			var idx = s.index("at"), c = idx.count();
+			c.onsuccess = function () {
+				var extra = c.result - DB_KEEP;
+				if (extra <= 0) return;
+				var cur = idx.openKeyCursor();
+				cur.onsuccess = function () {
+					var k = cur.result;
+					if (!k || extra-- <= 0) return;
+					s.delete(k.primaryKey);
+					k.continue();
+				};
+			};
+		});
+	}
+
+	// the last few players asked for, also in memory (a profile asks for its history once per part it shows)
+	var mem = [];
+	function remember(acc, e) {
+		mem = mem.filter(function (x) { return x[0] !== acc; });
+		mem.unshift([acc, e]);
+		if (mem.length > MEM_KEEP) mem.length = MEM_KEEP;
+	}
+
+	// what this browser keeps of a player's history: { at, d } or null (too old: null too). An entry from the
+	// localStorage days moves to disk.
+	function readKept(acc) {
+		for (var i = 0; i < mem.length; i++) if (mem[i][0] === acc) return Promise.resolve(Date.now() - mem[i][1].at < MH_MAX_MS ? mem[i][1] : null);
+		var old = DLRPage.read(MH_PREFIX + acc, MH_MAX_MS);
+		if (!IDB) return Promise.resolve(old);
+		return req(DB_STORE, "readonly", function (s) { return s.get(acc); }).then(function (e) {
+			if (old && (!e || e.at < old.at)) {
+				e = { at: old.at, d: old.d };
+				diskPut(acc, e).then(function (ok) { if (ok) try { localStorage.removeItem(MH_PREFIX + acc); } catch (x) { } });
+			} else if (old) {
+				try { localStorage.removeItem(MH_PREFIX + acc); } catch (x) { }
+			}
+			if (!e || !e.d || Date.now() - e.at >= MH_MAX_MS) return null;
+			remember(acc, e);
+			return e;
+		});
+	}
+
+	function diskPut(acc, e) {
+		return req(DB_STORE, "readwrite", function (s) { s.put(e, acc); }).then(function (ok) {
+			if (ok && Math.random() < 0.2) diskTrim();
+			return ok;
+		});
+	}
+
 	function keepHistory(acc, list) {
+		var e = { at: Date.now(), d: list };
+		if (IDB) {
+			remember(acc, e);
+			return diskPut(acc, e).then(function (ok) { if (!ok) keepLocal(acc, list); });
+		}
+		keepLocal(acc, list);
+		return Promise.resolve();
+	}
+
+	function keepLocal(acc, list) {
 		var text = JSON.stringify({ at: Date.now(), d: list });
 		var others = otherHistories(acc), size = text.length;
 		others.forEach(function (x) { size += x[2]; });
@@ -87,16 +185,18 @@ var DLRPV = (function () {
 		return loading[acc];
 	}
 
-	// { d: history, stale: true when a fresher one is being looked up } (wait: wait for that one)
-	function history(acc, wait) {
-		var kept = DLRPage.read(MH_PREFIX + acc, MH_MAX_MS);
-		var fresh = kept && Date.now() - kept.at < MH_FRESH_MS;
-		if (kept && (fresh || !wait)) {
-			if (!fresh) fetchHistory(acc).catch(function () { });
-			return Promise.resolve({ d: kept.d, stale: !fresh });
-		}
-		return fetchHistory(acc).then(function (d) { return { d: d, stale: false }; }, function (e) {
-			return kept ? { d: kept.d, stale: false, failed: true } : Promise.reject(e);
+	// { d: history, stale: true when a fresher one is being looked up } (wait: wait for that one; freshMs: how old a
+	// kept one may be to count as fresh)
+	function history(acc, wait, freshMs) {
+		return readKept(acc).then(function (kept) {
+			var fresh = kept && Date.now() - kept.at < (freshMs || MH_FRESH_MS);
+			if (kept && (fresh || !wait)) {
+				if (!fresh) fetchHistory(acc).catch(function () { });
+				return { d: kept.d, stale: !fresh };
+			}
+			return fetchHistory(acc).then(function (d) { return { d: d, stale: false }; }, function (e) {
+				return kept ? { d: kept.d, stale: false, failed: true } : Promise.reject(e);
+			});
 		});
 	}
 
@@ -367,5 +467,5 @@ var DLRPV = (function () {
 	}
 
 	return { M: M, history: history, rankHistory: rankHistory, matches: matches, streaks: streaks, row: row, summary: summary, builds: builds, heroStats: heroStats,
-		stats: stats, mates: mates, counted: counted, keepHistory: keepHistory };
+		stats: stats, mates: mates, counted: counted, keepHistory: keepHistory, readKept: readKept };
 })();
