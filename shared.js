@@ -70,12 +70,13 @@ var DLRPage = (function () {
 	var COLORS = ["#333333", "#6A3E1E", "#882355", "#5C6DAB", "#719C47", "#DDA326", "#EE4F57", "#B47FEB", "#955138", "#7C7C7C", "#C39751", "#5CE9A9"];
 	var ROMAN = ["", "I", "II", "III", "IV", "V", "VI"];
 
-	// ranked seasons, oldest first: { n, name, start, end (unix s), xp: points per subrank step }. deadlock-api's list
+	// ranked seasons, oldest first: { n, name, start, end (unix s), xp: points per subrank step, lb: leaderboard id }.
+	// deadlock-api's list
 	// (/v1/assets/ranked-seasons, kept a day) replaces this built-in copy once loaded.
-	var SEASONS_KEY = "dlr_seasons", SEASONS_MS = 24 * 3600 * 1000;
+	var SEASONS_KEY = "dlr_seasons2", SEASONS_MS = 24 * 3600 * 1000;
 	var BUILT_IN = [
-		{ n: 1, name: "Beta Season 1", start: 1785430800, end: 1793908800, xp: [1000, 1000, 1000, 1000, 1000, 2000] },
-		{ n: 2, name: "Beta Season 2", start: 1793908800, end: 1804802400, xp: [1000, 1000, 1000, 1000, 1000, 1500] }
+		{ n: 1, name: "Beta Season 1", start: 1785430800, end: 1793908800, xp: [1000, 1000, 1000, 1000, 1000, 2000], lb: 1001 },
+		{ n: 2, name: "Beta Season 2", start: 1793908800, end: 1804802400, xp: [1000, 1000, 1000, 1000, 1000, 1500], lb: 1002 }
 	];
 	var seasonList = null;
 
@@ -86,7 +87,7 @@ var DLRPage = (function () {
 			var xp = info && info.sub_rank_xp;
 			if (!iv || !(iv.start_timestamp > 0) || !xp || xp.length !== 6) return;
 			var m = /(\d+)\s*$/.exec(s.name || s.class_name || "");
-			out.push({ n: m ? Number(m[1]) : out.length + 1, name: s.name || "", start: iv.start_timestamp, end: iv.end_timestamp || 0, xp: xp.slice() });
+			out.push({ n: m ? Number(m[1]) : out.length + 1, name: s.name || "", start: iv.start_timestamp, end: iv.end_timestamp || 0, xp: xp.slice(), lb: iv.leaderboard_id || 0 });
 		});
 		return out.sort(function (a, b) { return a.start - b.start; });
 	}
