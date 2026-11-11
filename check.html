@@ -41,7 +41,9 @@ function run(test, i) {
 	res.textContent = "…";
 	var t0 = performance.now(), ctl = new AbortController();
 	var timer = setTimeout(function () { ctl.abort(); }, 25000);
-	return fetch(test[1] + (test[1].indexOf("?") < 0 ? "?" : "&") + "nocache=" + Date.now(), { signal: ctl.signal, cache: "no-store" })
+	// deadlock-api answers 400 to a query it does not know: no cache-buster there (no-store is enough)
+	var url = /github\.io/.test(test[1]) ? test[1] + "?nocache=" + Date.now() : test[1];
+	return fetch(url, { signal: ctl.signal, cache: "no-store" })
 		.then(function (r) {
 			return r.arrayBuffer().then(function (b) { return [r.status, b.byteLength]; });
 		})
