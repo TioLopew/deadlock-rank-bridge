@@ -46,17 +46,88 @@ var DLRPage = (function () {
 		try { return Math.max(0, Number(JSON.parse(localStorage.getItem(COOLDOWN_PREFIX + family) || "0")) - Date.now()); } catch (e) { return 0; }
 	}
 
+	// ---------- the mirror ----------
+	// Some Russian internet providers cut connections to Cloudflare (deadlock-api's host) after the first ~16 KB: small
+	// answers come, bigger ones stall or break. A request that fails that way (no answer, a network error, a broken or
+	// stalled body) goes again through the mod's mirror of deadlock-api (a proxy on Vercel, mirror/ in the mod's
+	// sources: the same paths, the same answers), and the page keeps to the mirror for a while (VIA_MS, in its storage).
+	// An HTTP answer (429, 404, 5xx) is an answer: no mirror for it.
+	var MIRROR = "https://deadlock-rank-mirror.vercel.app";
+	var VIA_KEY = "dlr_via_mirror", VIA_MS = 6 * 3600 * 1000;
+	var DIRECT_MS = 12000, MIRROR_MS = 25000;
+
+	function viaMirror() {
+		if (!MIRROR) return false;
+		try { return Date.now() - Number(localStorage.getItem(VIA_KEY) || 0) < VIA_MS; } catch (e) { return false; }
+	}
+
+	function useMirror(on) {
+		try {
+			if (on) localStorage.setItem(VIA_KEY, String(Date.now()));
+			else localStorage.removeItem(VIA_KEY);
+		} catch (e) { }
+	}
+
+	// { status, headers, data } of an answer (data: its json when ok); rejects { net } when no whole answer came in ms
+	function fetchJson(url, ms) {
+		return new Promise(function (resolve, reject) {
+			var over = false, ctl = null;
+			try { ctl = typeof AbortController === "function" ? new AbortController() : null; } catch (e) { ctl = null; }
+			var timer = typeof setTimeout === "function" ? setTimeout(function () {
+				over = true;
+				try { if (ctl) ctl.abort(); } catch (e) { }
+				reject({ net: "timeout" });
+			}, ms) : null;
+			function stop() {
+				try { if (timer !== null) clearTimeout(timer); } catch (e) { }
+			}
+			fetch(url, ctl ? { signal: ctl.signal } : undefined).then(function (r) {
+				if (!r.ok) return { status: r.status, headers: r.headers, data: null };
+				// the body is where a cut connection stalls: it is inside the same time limit
+				return r.json().then(function (d) { return { status: r.status, headers: r.headers, data: d }; });
+			}).then(function (x) {
+				if (over) return;
+				stop();
+				resolve(x);
+			}, function (e) {
+				if (over) return;
+				stop();
+				reject({ net: String(e && e.message || e) });
+			});
+		});
+	}
+
+	// deadlock-api, straight or through the mirror
+	function apiFetch(path) {
+		if (viaMirror()) {
+			return fetchJson(MIRROR + path, MIRROR_MS).catch(function () {
+				// the mirror is down: straight again (and the mirror only after that fails)
+				useMirror(false);
+				return fetchJson(API + path, DIRECT_MS);
+			});
+		}
+		return fetchJson(API + path, DIRECT_MS).catch(function (e) {
+			if (!MIRROR) return Promise.reject(e);
+			return fetchJson(MIRROR + path, MIRROR_MS).then(function (x) {
+				useMirror(true);
+				return x;
+			});
+		});
+	}
+
 	function get(path, family) {
 		var left = family ? cooldownLeft(family) : 0;
 		if (left > 0) return Promise.reject("cooldown " + Math.ceil(left / 1000) + "s");
-		return fetch(API + path).then(function (r) {
+		return apiFetch(path).then(function (r) {
 			if (r.status === 429 && family) {
 				var s = 0;
 				try { s = Number(r.headers.get("retry-after")); } catch (e) { s = 0; }
 				if (!(s > 0)) s = 60;
 				try { localStorage.setItem(COOLDOWN_PREFIX + family, JSON.stringify(Date.now() + Math.min(s, 3600) * 1000)); } catch (e) { }
 			}
-			return r.ok ? r.json() : Promise.reject("HTTP " + r.status);
+			return r.status >= 200 && r.status < 300 ? r.data : Promise.reject("HTTP " + r.status);
+		}, function (e) {
+			return Promise.reject("network " + (e && e.net || e));
 		});
 	}
 
@@ -108,7 +179,7 @@ var DLRPage = (function () {
 			if (e && e.list && e.list.length && Date.now() - e.at < SEASONS_MS) { seasonList = e.list; return Promise.resolve(seasonList); }
 		} catch (x) { }
 		if (typeof fetch !== "function") return Promise.resolve(seasons());
-		return fetch(API + "/v1/assets/ranked-seasons").then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
+		return get("/v1/assets/ranked-seasons")
 			.then(function (list) {
 				var got = parseSeasons(list);
 				if (got.length) {
@@ -248,7 +319,7 @@ var DLRPage = (function () {
 	}
 
 	return {
-		params: params, tell: tell, esc: esc, read: read, write: write, get: get, KEEP_MS: KEEP_MS,
+		params: params, tell: tell, esc: esc, read: read, write: write, get: get, apiFetch: apiFetch, viaMirror: viaMirror, KEEP_MS: KEEP_MS,
 		MAX_TIER: MAX_TIER, COLORS: COLORS, ROMAN: ROMAN, split: split, progress: progress, curve: curve,
 		seasons: seasons, loadSeasons: loadSeasons, seasonAt: seasonAt, range: range, parseSeasons: parseSeasons,
 		monotonePath: monotonePath, lift: lift, r2: r2, message: message
