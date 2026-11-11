@@ -10,9 +10,10 @@ svg { display: block; }
 //   &n=<the 12 tier names, in the game's language>&pl=<"points" in the game's language>
 //   &s=<season number to show; without it the newest season the player has ranked matches in>
 //   &fin=<"end of season" in the game's language>
+//   &wide=1: the line up to the right edge, no "rank now" block on the right (the profile's showcase has its own)
 // One ranked season's history, one point per match; the line follows the rank points, not only the badges. The
 // title tells the game which seasons have matches (ss) and which one shows (s), for its season buttons.
-var token = 0;
+var token = 0, WIDE = false;
 
 // ranked points and the rank now: what the bridge page keeps, else a small load of our own
 function load(acc) {
@@ -58,7 +59,7 @@ var ACCENT = "#3fbf7f", MUTED = "#c4c9d0";
 
 function draw(series, now, names, pointsWord, finWord) {
 	var W = Math.max(320, window.innerWidth || 1000), H = Math.max(90, window.innerHeight || 170);
-	var left = Math.round(W * 0.13), right = Math.round(W * 0.17), top = 10, bottom = 22;
+	var left = WIDE ? Math.min(170, Math.round(W * 0.13)) : Math.round(W * 0.13), right = WIDE ? 8 : Math.round(W * 0.17), top = 10, bottom = 22;
 	var plotW = W - left - right, plotH = H - top - bottom, plotBottom = top + plotH;
 	var vals = series.map(function (p) { return p[1]; });
 	var lowTier = Math.max(1, Math.floor(Math.min.apply(null, vals) / 6) + 1);
@@ -100,7 +101,7 @@ function draw(series, now, names, pointsWord, finWord) {
 	});
 	// the rank now: badge icon, name and subrank, points of the subrank (an older season: its final badge)
 	var badge = now && now[0] > 0 ? now[0] : series[series.length - 1][2], ts = DLRPage.split(badge);
-	if (ts) {
+	if (ts && !WIDE) {
 		var cx = left + plotW + 14, cy = top + plotH / 2;
 		s.push('<image href="ranks/tier' + ("0" + ts[0]).slice(-2) + '.webp" x="' + cx + '" y="' + r2(cy - 34) + '" width="34" height="34"/>');
 		s.push('<text x="' + (cx + 40) + '" y="' + r2(cy - 11) + '" fill="' + DLRPage.lift(DLRPage.COLORS[ts[0]]) + '" font-size="16" font-weight="800">' +
@@ -117,6 +118,7 @@ function start() {
 	var P = DLRPage.params(), acc = P.get("acc") || "", mine = ++token, want = Number(P.get("s")) || 0;
 	var names = String(P.get("n") || "Obscurus,Initiate,Seeker,Acolyte,Sentinel,Mystic,Ritualist,Emissary,Oracle,Phantom,Ascendant,Eternus").split(",");
 	var pointsWord = P.get("pl") || "Points", finWord = P.get("fin") || "";
+	WIDE = P.get("wide") === "1";
 	document.body.innerHTML = "";
 	if (!/^\d+$/.test(acc)) return DLRPage.tell(P, "error");
 	Promise.all([load(acc), DLRPage.loadSeasons()]).then(function (r) {
