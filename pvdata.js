@@ -340,7 +340,18 @@ var DLRPV = (function () {
 			var mine = all.filter(function (x) { return x[3] === cur; }), step = Math.max(1, mine.length / RH_MAX), out = [];
 			for (var i = 0; i < mine.length; i += step) out.push(mine[Math.floor(i)]);
 			if (mine.length && out[out.length - 1] !== mine[mine.length - 1]) out.push(mine[mine.length - 1]);
-			return { s: cur, ss: ss, p: out.map(function (x) { return Math.round(x[1] * 100) / 100; }), b: out.length ? [out[0][2], out[out.length - 1][2]] : [0, 0] };
+			// the season's ranked numbers: [games, wins, kills, deaths, assists, rank points won in all, longest win streak,
+			// rank points of the best match]
+			var st = [0, 0, 0, 0, 0, 0, 0, 0], run = 0;
+			r[0].d.filter(function (m) { return m[M.mode] === 4 && m[M.t] && DLRPage.seasonAt(m[M.t]).n === cur; })
+				.sort(function (x, y) { return x[M.t] - y[M.t]; }).forEach(function (m) {
+					st[0]++;
+					if (m[M.win]) { st[1]++; run++; if (run > st[6]) st[6] = run; } else run = 0;
+					st[2] += m[M.k] || 0; st[3] += m[M.d] || 0; st[4] += m[M.a] || 0;
+					st[5] += m[M.delta] || 0;
+					if ((m[M.delta] || 0) > st[7]) st[7] = m[M.delta];
+				});
+			return { s: cur, ss: ss, p: out.map(function (x) { return Math.round(x[1] * 100) / 100; }), b: out.length ? [out[0][2], out[out.length - 1][2]] : [0, 0], st: st };
 		});
 	}
 
