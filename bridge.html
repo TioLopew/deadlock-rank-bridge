@@ -556,6 +556,22 @@ var jobs = {
 			}, fail);
 		} else if (part === "rh") {
 			DLRPV.rankHistory(acc, Number(P.get("season")) || 0).then(function (r) { job.send({ k: "rh", d: r }, 1); }, fail);
+		} else if (part === "find") {
+			// Steam profiles by name (deadlock-api's search, players of the game first): [account, name, games in the
+			// last 30 days, the name in a steamcommunity.com/id/ link]
+			// ("who": "q" is the bridge's own)
+			var q = String(P.get("who") || "").slice(0, 64);
+			if (q.length < 2) return fail("query");
+			DLRPage.get("/v1/players/steam-search?search_query=" + encodeURIComponent(q) + "&limit=10&min_matches_played_last_30d=0", "pv").then(function (list) {
+				job.sendList("found", (list || []).slice(0, 10).map(function (p) {
+					var v = /steamcommunity\.com\/id\/([^\/]+)/.exec(String(p.profileurl || ""));
+					return [String(p.account_id), String(p.personaname || "").slice(0, 40), p.matches_played_last_30d || 0, v ? v[1] : ""];
+				}), 1);
+			}, function (e) {
+				// (nobody by that name: deadlock-api answers 404)
+				if (/HTTP 404/.test(String(e))) job.sendList("found", [], 1);
+				else fail(e);
+			});
 		} else if (part === "style") {
 			DLRStyle.load(acc).then(function (r) { job.send({ k: "style", d: r }, 1); }, fail);
 		} else if (part === "stats") {
