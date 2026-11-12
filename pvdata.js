@@ -312,11 +312,16 @@ var DLRPV = (function () {
 		var x = new Date(t * 1000);
 		return x.getFullYear() * 10000 + (x.getMonth() + 1) * 100 + x.getDate();
 	}
-	// [[yyyymmdd, matches], ...] of a list, for the calendar
+	// [[yyyymmdd, matches, wins], ...] of a list, for the calendar
 	function dayCounts(list) {
 		var by = {};
-		list.forEach(function (m) { if (m[M.t]) { var k = dayOf(m[M.t]); by[k] = (by[k] || 0) + 1; } });
-		return Object.keys(by).map(function (k) { return [Number(k), by[k]]; });
+		list.forEach(function (m) {
+			if (!m[M.t]) return;
+			var k = dayOf(m[M.t]), e = by[k] || (by[k] = [Number(k), 0, 0]);
+			e[1]++;
+			if (m[M.win]) e[2]++;
+		});
+		return Object.keys(by).map(function (k) { return by[k]; });
 	}
 
 	function matches(list, f) {
@@ -425,6 +430,79 @@ var DLRPV = (function () {
 			DLRPage.write(BUILDS_KEY, { m: kept });
 			return out;
 		}, function () { return out; });
+	}
+
+	// ---------- item cards ----------
+	// What the shop tells of an item, for the mod's own card of it (dlr_pv.js itemCard): deadlock-api's asset list of
+	// upgrades in the game's language (2 MB: kept compact in localStorage for ITEMS_MS), per item
+	// [name, tier, cost, slot, sections]; a section: [innate | passive | active, its text, [[label, value], ...], cooldown]
+	var ITEMS_PREFIX = "dlr_pv_items_", ITEMS_MS = 2 * DAYMS, itemsMem = {};
+	function itemText(t) {
+		return String(t || "").replace(/<br\s*\/?>/gi, "\n").replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&")
+			.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/\{[^}]*\}/g, "").replace(/[ \t]+/g, " ").replace(/\n\s*/g, "\n").trim();
+	}
+	function itemValue(p) {
+		var v = String(p.value === undefined || p.value === null ? "" : p.value).trim();
+		if (!v || v === String(p.disable_value) || !isFinite(Number(v)) || Number(v) === 0) return "";
+		var n = Number(v), t = String(Math.round(n * 100) / 100);
+		var sign = /\{s:sign\}/.test(p.prefix || "") && n > 0 ? "+" : "";
+		return sign + t + String(p.postfix || "").replace(/\{[^}]*\}/g, "");
+	}
+	function compactItem(x) {
+		var props = x.properties || {}, secs = [];
+		function stats(names) {
+			var out = [];
+			(names || []).forEach(function (k) {
+				var p = props[k];
+				if (!p || !p.label || /cooldown/.test(p.css_class || "")) return;
+				var v = itemValue(p);
+				if (v) out.push([itemText(p.label), v]);
+			});
+			return out;
+		}
+		(x.tooltip_sections || []).forEach(function (sec) {
+			var type = sec.section_type || "innate", text = [], st = [];
+			(sec.section_attributes || []).forEach(function (a) {
+				if (a.loc_string) text.push(itemText(a.loc_string));
+				st = st.concat(stats(a.properties), stats(a.elevated_properties), stats(a.important_properties));
+			});
+			var seen = {};
+			st = st.filter(function (q) { var k = q[0] + q[1]; if (seen[k]) return false; seen[k] = 1; return true; });
+			var cd = type === "active" && props.AbilityCooldown ? itemValue(props.AbilityCooldown) : "";
+			if (text.length || st.length) secs.push([type, text.join("\n"), st, cd]);
+		});
+		// (no sections: the description alone)
+		if (!secs.length) {
+			var d = x.description && (x.description.desc || x.description.passive || x.description.active);
+			if (d) secs.push(["innate", itemText(d), [], ""]);
+		}
+		return [itemText(x.name), x.item_tier || 0, x.cost || 0, x.item_slot_type || "", secs];
+	}
+	function itemTable(lang) {
+		if (itemsMem[lang]) return Promise.resolve(itemsMem[lang]);
+		var kept = DLRPage.read(ITEMS_PREFIX + lang, ITEMS_MS);
+		if (kept && kept.d) return Promise.resolve(itemsMem[lang] = kept.d);
+		return api("/v1/assets/items/by-type/upgrade?language=" + lang).then(function (list) {
+			var d = {};
+			(list || []).forEach(function (x) {
+				if (x && x.id && x.item_slot_type && x.item_tier) d[x.id] = compactItem(x);
+			});
+			itemsMem[lang] = d;
+			DLRPage.write(ITEMS_PREFIX + lang, { d: d });
+			return d;
+		});
+	}
+	// the cards of these items ({ id: card }); another language than English that fails: the English ones
+	function itemCards(lang, ids) {
+		lang = /^[a-z]{2,20}$/.test(lang || "") ? lang : "english";
+		function pick(d) {
+			var out = {};
+			ids.forEach(function (id) { if (d[id]) out[id] = d[id]; });
+			return out;
+		}
+		return itemTable(lang).then(pick, function (e) {
+			return lang === "english" ? Promise.reject(e) : itemTable("english").then(pick);
+		});
 	}
 
 	// ---------- per-hero stats ----------
@@ -614,5 +692,6 @@ var DLRPV = (function () {
 
 	return { M: M, history: history, rankHistory: rankHistory, matches: matches, streaks: streaks, row: row, summary: summary, builds: builds, heroStats: heroStats,
 		stats: stats, mates: mates, counted: counted, keepHistory: keepHistory, readKept: readKept,
-		keepNatives: keepNatives, natives: natives, withNatives: withNatives, dayCounts: dayCounts };
+		keepNatives: keepNatives, natives: natives, withNatives: withNatives, dayCounts: dayCounts,
+		itemCards: itemCards, compactItem: compactItem };
 })();
