@@ -286,8 +286,11 @@ var DLRPV = (function () {
 	}
 
 	// ---------- final builds ----------
-	// match id -> up to 12 item ids, bought order, sold ones left out; kept a week (the same entries profile.html keeps)
-	var BUILDS_KEY = "dlr_pv_builds";
+	// match id -> the last 24 item ids, bought order, sold ones left out; kept a week. The list has the hero's ability
+	// unlocks / upgrades in it too (one id per ability), which the mod leaves out (not shop items): a normal match ends
+	// with 12 shop items at most, Street Brawl with more (15 or so). The builds that cut at 12 (abilities in) were
+	// kept under "dlr_pv_builds" (profile.html's)
+	var BUILDS_KEY = "dlr_pv_builds2", BUILD_MAX = 24;
 	function builds(acc, ids) {
 		var kept = (DLRPage.read(BUILDS_KEY, 7 * DAYMS) || {}).m || {}, out = {}, want = [];
 		ids.forEach(function (id) {
@@ -304,7 +307,7 @@ var DLRPV = (function () {
 					.sort(function (a, b) { return a.game_time_s - b.game_time_s; });
 				var seen = {}, b = [];
 				own.forEach(function (it) { if (!seen[it.item_id]) { seen[it.item_id] = 1; b.push(it.item_id); } });
-				out[m.match_id] = kept[acc + ":" + m.match_id] = b.slice(-12);
+				out[m.match_id] = kept[acc + ":" + m.match_id] = b.slice(-BUILD_MAX);
 			});
 			var keys = Object.keys(kept);
 			if (keys.length > 600) keys.slice(0, keys.length - 600).forEach(function (k) { delete kept[k]; });
@@ -464,7 +467,7 @@ var DLRPV = (function () {
 				});
 			// the chart's points (one per ranked match of the season, oldest first, as rank-history.html draws them) with
 			// their matches: [match id, hero, win, rank points, k, d, a, badge after, placement, demotion protection used,
-			// souls, start]; and the season's longest win / loss streak along them: [first point, last point, length]
+			// souls, start]
 			var byT = {};
 			r[0].d.forEach(function (m) { if (m[M.mode] === 4 && m[M.t]) byT[m[M.t]] = m; });
 			var hm = mine.map(function (x) {
@@ -472,20 +475,7 @@ var DLRPV = (function () {
 				return m ? [m[M.id], m[M.hero], m[M.win], m[M.delta], m[M.k], m[M.d], m[M.a], x[2], m[M.cal], m[M.prot], m[M.nw], x[0]] :
 					[0, 0, -1, null, 0, 0, 0, x[2], 0, 0, 0, x[0]];
 			});
-			function longest(want) {
-				var best = null, from = -1;
-				for (var i = 0; i <= hm.length; i++) {
-					var hit = i < hm.length && hm[i][2] === want;
-					if (hit && from < 0) from = i;
-					if (!hit && from >= 0) {
-						if (!best || i - from > best[2]) best = [from, i - 1, i - from];
-						from = -1;
-					}
-				}
-				return best && best[2] >= 2 ? best : null;
-			}
-			return { s: cur, ss: ss, p: out.map(function (x) { return Math.round(x[1] * 100) / 100; }), b: out.length ? [out[0][2], out[out.length - 1][2]] : [0, 0], st: st,
-				ws: longest(1), ls: longest(0), hm: hm };
+			return { s: cur, ss: ss, p: out.map(function (x) { return Math.round(x[1] * 100) / 100; }), b: out.length ? [out[0][2], out[out.length - 1][2]] : [0, 0], st: st, hm: hm };
 		});
 	}
 
