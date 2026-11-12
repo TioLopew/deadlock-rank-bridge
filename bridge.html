@@ -1,4 +1,4 @@
-<!doctype html><meta charset="utf-8"><title>Deadlock rank mod bridge</title><script src="shared.js?v=da2c788e39"></script><script src="playstyle.js?v=e114d79377"></script><script src="pvdata.js?v=3a1619079e"></script><script>
+<!doctype html><meta charset="utf-8"><title>Deadlock rank mod bridge</title><script src="shared.js?v=da2c788e39"></script><script src="playstyle.js?v=e114d79377"></script><script src="pvdata.js?v=c66c6103a8"></script><script>
 // Bridge page of the Deadlock rank mod, opened by the game in a hidden HTML panel (the game's HTML panels only open
 // http(s) pages, so it is hosted on GitHub Pages):
 //   bridge.html#job=<profile|ranks|allbadges|party>&p=<title prefix>&q=<request id>&acc=<account>|accs=<accounts>|f=..&e=..
@@ -545,6 +545,7 @@ var jobs = {
 	// The mod's profile page as the game draws it (dlr_pv.js): one part per job (pvdata.js has what each carries).
 	//   part=mh&hero=&mode=&res=&season=&from=&n=&wait=   summary of the whole history, then the filtered rows from..from+n
 	//   part=b&ids=<match ids>                         final builds of those matches
+//   part=items&lang=&ids=<item ids>                 the shop's cards of those items
 	//   part=heroes&season=&mode= | part=mates&side=&season= | part=style | part=stats&hero= | part=rh&season=
 	pv: function (job) {
 		var P = job.P, acc = P.get("acc") || "", part = P.get("part");
@@ -574,6 +575,10 @@ var jobs = {
 		} else if (part === "b") {
 			var ids = String(P.get("ids") || "").split(",").filter(function (x) { return /^\d+$/.test(x); }).slice(0, 20);
 			DLRPV.builds(acc, ids).then(function (out) { job.sendMap("b", out, 1); }, fail);
+		} else if (part === "items") {
+			// the shop's cards of some items (part=items&lang=&ids=)
+			var iids = String(P.get("ids") || "").split(",").filter(function (x) { return /^\d+$/.test(x); }).slice(0, 60);
+			DLRPV.itemCards(P.get("lang") || "", iids).then(function (out) { job.sendMap("it", out, 1); }, fail);
 		} else if (part === "heroes") {
 			DLRPV.heroStats(acc, P.get("season") || "all", P.get("mode") || "").then(function (rows) {
 				job.sendList("heroes", rows.map(function (x) { return x.slice(0, 10); }), 1);
