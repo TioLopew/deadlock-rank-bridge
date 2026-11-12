@@ -5,7 +5,7 @@ svg { display: block; }
 </style>
 <body>
 <script src="shared.js?v=da2c788e39"></script>
-<script src="pvdata.js?v=79304f6043"></script>
+<script src="pvdata.js?v=0fc1df80dc"></script>
 <script>
 // Rank history chart of the profile page: rank-history.html#acc=<account>&p=<title prefix>&q=<request id>
 //   &n=<the 12 tier names, in the game's language>&pl=<"points" in the game's language>
@@ -78,8 +78,11 @@ var ACCENT = "#3fbf7f", MUTED = "#c4c9d0", WIN = "#61E761", LOSS = "#E05555";
 function hex(v, d) { return /^[0-9a-fA-F]{6}$/.test(v || "") ? "#" + v : d; }
 
 function draw(series, now, names, pointsWord, finWord) {
-	var W = Math.max(320, window.innerWidth || 1000), H = Math.max(90, window.innerHeight || 170);
-	var left = WIDE ? Math.min(170, Math.round(W * 0.13)) : Math.round(W * 0.13), right = WIDE ? 8 : Math.round(W * 0.17), top = 10, bottom = 22;
+	var PW = Math.max(320, window.innerWidth || 1000), PH = Math.max(90, window.innerHeight || 170);
+	// wide (the showcase's): drawn in the 1658 x 290 the mod's columns under the page count in, the picture scaled to
+	// the panel's pixels (the game's html panel can have more or fewer of them), text and all
+	var W = WIDE ? 1658 : PW, H = WIDE ? 290 : PH;
+	var left = WIDE ? 170 : Math.round(W * 0.13), right = WIDE ? 8 : Math.round(W * 0.17), top = 10, bottom = 22;
 	var plotW = W - left - right, plotH = H - top - bottom, plotBottom = top + plotH;
 	var vals = series.map(function (p) { return p[1]; });
 	var lowTier = Math.max(1, Math.floor(Math.min.apply(null, vals) / 6) + 1);
@@ -100,7 +103,7 @@ function draw(series, now, names, pointsWord, finWord) {
 	// a point of the whole season (not only of the thinned line) along the plot
 	var N = series.length;
 	function X(i) { return N === 1 ? left + plotW / 2 : left + pad + i / (N - 1) * (plotW - 2 * pad); }
-	var s = ['<svg xmlns="http://www.w3.org/2000/svg" width="' + W + '" height="' + H + '" font-family="Radiance, Segoe UI, sans-serif">',
+	var s = ['<svg xmlns="http://www.w3.org/2000/svg" width="' + PW + '" height="' + PH + '" viewBox="0 0 ' + W + " " + H + '" preserveAspectRatio="none" font-family="Radiance, Segoe UI, sans-serif">',
 		'<defs><linearGradient id="a" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="' + ACCENT + '" stop-opacity="0.25"/><stop offset="1" stop-color="' + ACCENT + '" stop-opacity="0"/></linearGradient></defs>'];
 	for (var t = lowTier; t <= highTier; t++) {
 		var bandTop = y(t * 6), mid = bandTop + bandH / 2;
@@ -155,6 +158,10 @@ function start() {
 		if (!all.length) return DLRPage.tell(P, "empty", { ss: [], s: 0 });
 		var shown = have.indexOf(want) >= 0 ? want : have[have.length - 1];
 		var series = all.filter(function (p) { return p[3] === shown; });
+		// the points the mod's columns have (a newer match kept since: on the chart the next time)
+		var lt = Number(P.get("lt")) || 0, np = Number(P.get("np")) || 0;
+		if (lt && series.some(function (p) { return p[0] <= lt; })) series = series.filter(function (p) { return p[0] <= lt; });
+		if (np && series.length > np) series = series.slice(series.length - np);
 		// the badge and points now belong to the current season's line only; an older season shows how it ended
 		var current = DLRPage.seasonAt(Date.now() / 1000).n;
 		var now = shown === current && shown === all[all.length - 1][3] ? d.now || d.last : null;
@@ -162,7 +169,7 @@ function start() {
 		var redraw = function () { if (mine === token) draw(series, now, names, pointsWord, finWord); };
 		redraw();
 		window.onresize = redraw;
-		DLRPage.tell(P, "ready", { ss: have, s: shown });
+		DLRPage.tell(P, "ready", { ss: have, s: shown, n: series.length });
 	}, function () {
 		if (mine === token) DLRPage.tell(P, "error");
 	});
