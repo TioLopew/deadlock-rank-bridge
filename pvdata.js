@@ -18,7 +18,7 @@ var DLRPV = (function () {
 	// ---------- match history ----------
 	// compact, newest first: [match id, hero, start, duration s, match mode, game mode, win, k, d, a, souls, last hits,
 	// denies, rank gain, badge, placement match, demotion protection used, left the match]
-	var M = { id: 0, hero: 1, t: 2, dur: 3, mode: 4, gmode: 5, win: 6, k: 7, d: 8, a: 9, nw: 10, lh: 11, dn: 12, delta: 13, badge: 14, cal: 15, prot: 16, left: 17 };
+	var M = { id: 0, hero: 1, t: 2, dur: 3, mode: 4, gmode: 5, win: 6, k: 7, d: 8, a: 9, nw: 10, lh: 11, dn: 12, delta: 13, badge: 14, cal: 15, prot: 16, left: 17, nat: 18 };
 	// Kept histories live on disk, in this browser's IndexedDB (DB_KEEP players, the ones not seen the longest go
 	// first: a few hundred kB each at most); a browser without it keeps them in localStorage as before (up to MH_KEEP
 	// within MH_BUDGET characters, the same entries profile.html keeps). A kept one shows at once (then the fresh one
@@ -200,6 +200,82 @@ var DLRPV = (function () {
 		});
 	}
 
+	// ---------- the game's own match history ----------
+	// Matches the game itself showed (its profile's recent matches, its all-matches page: from Valve's servers), sent
+	// by the mod (pv job, param nat): [match id (0: none), hero, start, length, mode, game mode, win, souls]. Kept per
+	// player in localStorage (NAT_MAX newest, NAT_ACCS players), they go into the history wherever deadlock-api lacks
+	// them (a match it has not got yet, or never), so a player's own matches are all there whatever deadlock-api has:
+	// with what the game tells (no kills / deaths / assists, no rank points), marked M.nat.
+	var NAT_PREFIX = "dlr_pv_nat_", NAT_MAX = 3000, NAT_ACCS = 40;
+	function natives(acc) {
+		try {
+			var e = JSON.parse(localStorage.getItem(NAT_PREFIX + acc) || "null");
+			return e && Array.isArray(e.d) ? e.d : [];
+		} catch (x) {
+			return [];
+		}
+	}
+	function natKey(n) {
+		return n[0] ? "i" + n[0] : "t" + n[2] + "h" + n[1];
+	}
+	function keepNatives(acc, rows) {
+		if (!/^\d+$/.test(String(acc)) || !Array.isArray(rows)) return 0;
+		var now = Date.now() / 1000, by = {}, added = 0;
+		natives(acc).forEach(function (n) { by[natKey(n)] = n; });
+		rows.forEach(function (r) {
+			if (!Array.isArray(r) || r.length < 8) return;
+			var n = r.slice(0, 8).map(function (x) { return Math.max(0, Math.round(Number(x) || 0)); });
+			if (!(n[2] > 1500000000 && n[2] < now + 86400) || !n[1]) return;
+			n[6] = n[6] ? 1 : 0;
+			var k = natKey(n);
+			// (a match first seen without its id, then with it: one entry)
+			if (n[0] && by["t" + n[2] + "h" + n[1]]) delete by["t" + n[2] + "h" + n[1]];
+			if (!by[k]) added++;
+			by[k] = n;
+		});
+		if (!added) return 0;
+		var list = Object.keys(by).map(function (k) { return by[k]; }).sort(function (a, b) { return b[2] - a[2]; }).slice(0, NAT_MAX);
+		var text = JSON.stringify({ at: Date.now(), d: list });
+		try {
+			localStorage.setItem(NAT_PREFIX + acc, text);
+		} catch (x) {
+			trimNatives(acc, 0);
+			try { localStorage.setItem(NAT_PREFIX + acc, text); } catch (y) { return 0; }
+		}
+		trimNatives(acc, NAT_ACCS);
+		return added;
+	}
+	// other players' kept ones beyond keep, the ones kept the longest ago first
+	function trimNatives(acc, keep) {
+		var all = [];
+		try {
+			for (var i = 0; i < localStorage.length; i++) {
+				var k = localStorage.key(i);
+				if (k && k.indexOf(NAT_PREFIX) === 0 && k !== NAT_PREFIX + acc) {
+					var m = /^\{"at":(\d+)/.exec(localStorage.getItem(k) || "");
+					all.push([k, m ? Number(m[1]) : 0]);
+				}
+			}
+		} catch (x) { return; }
+		all.sort(function (a, b) { return b[1] - a[1]; });
+		all.slice(Math.max(0, keep - 1)).forEach(function (x) { try { localStorage.removeItem(x[0]); } catch (y) { } });
+	}
+	// the history with the game's matches deadlock-api lacks (the same match: the same id, or the same hero started
+	// within two minutes)
+	function withNatives(acc, list) {
+		var nat = natives(acc);
+		if (!nat.length) return list;
+		var ids = {}, add = [];
+		list.forEach(function (m) { ids[m[M.id]] = 1; });
+		nat.forEach(function (n) {
+			if (n[0] && ids[n[0]]) return;
+			for (var i = 0; i < list.length; i++) if (list[i][M.hero] === n[1] && Math.abs(list[i][M.t] - n[2]) <= 120) return;
+			add.push([n[0] || -n[2], n[1], n[2], n[3], n[4], n[5], n[6], null, null, null, n[7] || 0, 0, 0, null, 0, 0, 0, 0, 1]);
+		});
+		if (!add.length) return list;
+		return list.concat(add).sort(function (a, b) { return b[M.t] - a[M.t]; });
+	}
+
 	// normal games: unranked / ranked / placement (the game's own count)
 	function counted(m) {
 		return m[M.gmode] === 1 && (m[M.mode] === 1 || m[M.mode] === 4 || m[M.mode] === 8);
@@ -228,7 +304,7 @@ var DLRPV = (function () {
 	function streaks(list) {
 		var out = {}, n = 0;
 		list.slice().reverse().forEach(function (m) {
-			if (m[M.mode] !== 4) return;
+			if (m[M.mode] !== 4 || m[M.nat]) return;
 			n = m[M.win] && m[M.delta] > 0 ? n + 1 : 0;
 			out[m[M.id]] = n;
 		});
@@ -236,7 +312,8 @@ var DLRPV = (function () {
 	}
 
 	// a row as the game draws it: [match id, hero, start, duration, mode code, win, k, d, a, souls, rank gain (null:
-	// none), note (0, 1 placement, 2 demotion protection, n >= 3: ranked win streak of n), left the match]
+	// none), note (0, 1 placement, 2 demotion protection, n >= 3: ranked win streak of n), left the match, from the
+	// game only (1: no kills / deaths / assists known)]
 	function row(m, st) {
 		var note = 0;
 		if (m[M.mode] === 4 && m[M.delta] !== null) {
@@ -245,7 +322,7 @@ var DLRPV = (function () {
 			else if (m[M.delta] > 0 && st[m[M.id]] >= 3) note = st[m[M.id]];
 		}
 		return [m[M.id], m[M.hero], m[M.t], m[M.dur], modeCode(m), m[M.win], m[M.k], m[M.d], m[M.a], m[M.nw],
-			m[M.mode] === 4 ? m[M.delta] : null, note, m[M.left]];
+			m[M.mode] === 4 ? m[M.delta] : null, note, m[M.left], m[M.nat] ? 1 : 0];
 	}
 
 	function smurf(list, g) {
@@ -480,5 +557,6 @@ var DLRPV = (function () {
 	}
 
 	return { M: M, history: history, rankHistory: rankHistory, matches: matches, streaks: streaks, row: row, summary: summary, builds: builds, heroStats: heroStats,
-		stats: stats, mates: mates, counted: counted, keepHistory: keepHistory, readKept: readKept };
+		stats: stats, mates: mates, counted: counted, keepHistory: keepHistory, readKept: readKept,
+		keepNatives: keepNatives, natives: natives, withNatives: withNatives };
 })();
