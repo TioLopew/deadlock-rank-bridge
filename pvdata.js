@@ -220,17 +220,22 @@ var DLRPV = (function () {
 	}
 	function keepNatives(acc, rows) {
 		if (!/^\d+$/.test(String(acc)) || !Array.isArray(rows)) return 0;
-		var now = Date.now() / 1000, by = {}, added = 0;
-		natives(acc).forEach(function (n) { by[natKey(n)] = n; });
+		var now = Date.now() / 1000, by = {}, withId = {}, added = 0;
+		natives(acc).forEach(function (n) {
+			by[natKey(n)] = n;
+			if (n[0]) withId[n[2] + "h" + n[1]] = 1;
+		});
 		rows.forEach(function (r) {
 			if (!Array.isArray(r) || r.length < 8) return;
 			var n = r.slice(0, 8).map(function (x) { return Math.max(0, Math.round(Number(x) || 0)); });
 			if (!(n[2] > 1500000000 && n[2] < now + 86400) || !n[1]) return;
 			n[6] = n[6] ? 1 : 0;
 			var k = natKey(n);
-			// (a match first seen without its id, then with it: one entry)
+			// (a match first seen without its id, then with it: one entry; the other way round: the one with its id)
 			if (n[0] && by["t" + n[2] + "h" + n[1]]) delete by["t" + n[2] + "h" + n[1]];
-			if (!by[k]) added++;
+			if (!n[0] && withId[n[2] + "h" + n[1]]) return;
+			if (n[0]) withId[n[2] + "h" + n[1]] = 1;
+			if (!by[k] || JSON.stringify(by[k]) !== JSON.stringify(n)) added++;
 			by[k] = n;
 		});
 		if (!added) return 0;
@@ -265,11 +270,21 @@ var DLRPV = (function () {
 	function withNatives(acc, list) {
 		var nat = natives(acc);
 		if (!nat.length) return list;
-		var ids = {}, add = [];
-		list.forEach(function (m) { ids[m[M.id]] = 1; });
+		// (start times by hero: the history's and the ones added, so one match the game showed twice is added once)
+		var ids = {}, starts = {}, add = [];
+		function near(hero, t) {
+			var s = starts[hero] || [];
+			for (var i = 0; i < s.length; i++) if (Math.abs(s[i] - t) <= 120) return true;
+			return false;
+		}
+		list.forEach(function (m) {
+			ids[m[M.id]] = 1;
+			(starts[m[M.hero]] || (starts[m[M.hero]] = [])).push(m[M.t]);
+		});
 		nat.forEach(function (n) {
-			if (n[0] && ids[n[0]]) return;
-			for (var i = 0; i < list.length; i++) if (list[i][M.hero] === n[1] && Math.abs(list[i][M.t] - n[2]) <= 120) return;
+			if ((n[0] && ids[n[0]]) || near(n[1], n[2])) return;
+			if (n[0]) ids[n[0]] = 1;
+			(starts[n[1]] || (starts[n[1]] = [])).push(n[2]);
 			add.push([n[0] || -n[2], n[1], n[2], n[3], n[4], n[5], n[6], null, null, null, n[7] || 0, 0, 0, null, 0, 0, 0, 0, 1]);
 		});
 		if (!add.length) return list;
