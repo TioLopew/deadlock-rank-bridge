@@ -462,7 +462,30 @@ var DLRPV = (function () {
 					st[5] += m[M.delta] || 0;
 					if ((m[M.delta] || 0) > st[7]) st[7] = m[M.delta];
 				});
-			return { s: cur, ss: ss, p: out.map(function (x) { return Math.round(x[1] * 100) / 100; }), b: out.length ? [out[0][2], out[out.length - 1][2]] : [0, 0], st: st };
+			// the chart's points (one per ranked match of the season, oldest first, as rank-history.html draws them) with
+			// their matches: [match id, hero, win, rank points, k, d, a, badge after, placement, demotion protection used,
+			// souls, start]; and the season's longest win / loss streak along them: [first point, last point, length]
+			var byT = {};
+			r[0].d.forEach(function (m) { if (m[M.mode] === 4 && m[M.t]) byT[m[M.t]] = m; });
+			var hm = mine.map(function (x) {
+				var m = byT[x[0]];
+				return m ? [m[M.id], m[M.hero], m[M.win], m[M.delta], m[M.k], m[M.d], m[M.a], x[2], m[M.cal], m[M.prot], m[M.nw], x[0]] :
+					[0, 0, -1, null, 0, 0, 0, x[2], 0, 0, 0, x[0]];
+			});
+			function longest(want) {
+				var best = null, from = -1;
+				for (var i = 0; i <= hm.length; i++) {
+					var hit = i < hm.length && hm[i][2] === want;
+					if (hit && from < 0) from = i;
+					if (!hit && from >= 0) {
+						if (!best || i - from > best[2]) best = [from, i - 1, i - from];
+						from = -1;
+					}
+				}
+				return best && best[2] >= 2 ? best : null;
+			}
+			return { s: cur, ss: ss, p: out.map(function (x) { return Math.round(x[1] * 100) / 100; }), b: out.length ? [out[0][2], out[out.length - 1][2]] : [0, 0], st: st,
+				ws: longest(1), ls: longest(0), hm: hm };
 		});
 	}
 
