@@ -449,6 +449,8 @@ var jobs = {
 		if (saved.p) give({ k: "p", d: saved.p });
 		if (saved.g) give({ k: "g", d: saved.g });
 		if (saved.pk) give({ k: "pk", d: saved.pk });
+		if (saved.hs) give({ k: "hs", d: saved.hs });
+		if (saved.f) give({ k: "f", d: saved.f });
 		if (oldHistory) give({ k: "h", d: oldHistory.p.length });
 		if (!saved.t && !saved.p && !saved.g) job.send({ k: "hi" }, 0);
 		// rank progress: badge and rank points after the latest ranked match
@@ -470,6 +472,14 @@ var jobs = {
 		DLRPage.loadSeasons();
 		var full = false;
 		var heroes = get("/v1/players/hero-stats?account_ids=" + acc + "&game_mode=normal").then(function (list) {
+			// games / wins on each hero (the hover card shows the ones of the hero he has in a match)
+			var hs = {};
+			list.forEach(function (h) { if (h.hero_id && h.matches_played > 0) hs[h.hero_id] = [h.matches_played, h.wins || 0]; });
+			if (list.length) {
+				saved.hs = hs;
+				store(acc, saved);
+				give({ k: "hs", d: hs });
+			}
 			// stored totals from the full history beat fresh quick ones
 			if (!full && !saved.full && list.length) {
 				var t = [0, 0, 0];
@@ -504,6 +514,13 @@ var jobs = {
 				t[1] += m[M.win] ? 1 : 0;
 				t[2] += m[M.lh] || 0;
 			});
+			// the start of the first match deadlock-api knows of him
+			var first = 0;
+			all.forEach(function (m) { if (m[M.t] > 0 && (!first || m[M.t] < first)) first = m[M.t]; });
+			if (first) {
+				saved.f = first;
+				give({ k: "f", d: first });
+			}
 			full = true;
 			saved.t = t;
 			saved.full = 1;
@@ -556,22 +573,6 @@ var jobs = {
 			}, fail);
 		} else if (part === "rh") {
 			DLRPV.rankHistory(acc, Number(P.get("season")) || 0).then(function (r) { job.send({ k: "rh", d: r }, 1); }, fail);
-		} else if (part === "find") {
-			// Steam profiles by name (deadlock-api's search, players of the game first): [account, name, games in the
-			// last 30 days, the name in a steamcommunity.com/id/ link]
-			// ("who": "q" is the bridge's own)
-			var q = String(P.get("who") || "").slice(0, 64);
-			if (q.length < 2) return fail("query");
-			DLRPage.get("/v1/players/steam-search?search_query=" + encodeURIComponent(q) + "&limit=10&min_matches_played_last_30d=0", "pv").then(function (list) {
-				job.sendList("found", (list || []).slice(0, 10).map(function (p) {
-					var v = /steamcommunity\.com\/id\/([^\/]+)/.exec(String(p.profileurl || ""));
-					return [String(p.account_id), String(p.personaname || "").slice(0, 40), p.matches_played_last_30d || 0, v ? v[1] : ""];
-				}), 1);
-			}, function (e) {
-				// (nobody by that name: deadlock-api answers 404)
-				if (/HTTP 404/.test(String(e))) job.sendList("found", [], 1);
-				else fail(e);
-			});
 		} else if (part === "style") {
 			DLRStyle.load(acc).then(function (r) { job.send({ k: "style", d: r }, 1); }, fail);
 		} else if (part === "stats") {
