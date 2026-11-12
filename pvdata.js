@@ -302,8 +302,27 @@ var DLRPV = (function () {
 		return [1, 2, 3, 4, 7, 8].indexOf(m[M.mode]) >= 0 ? m[M.mode] : 0;
 	}
 
+	// a day (yyyymmdd) as start / end times (unix s), in this browser's time: the game's own (the same computer)
+	function dayRange(day) {
+		var d = /^(\d{4})(\d{2})(\d{2})$/.exec(String(day || ""));
+		if (!d) return null;
+		return [new Date(+d[1], +d[2] - 1, +d[3]).getTime() / 1000, new Date(+d[1], +d[2] - 1, +d[3] + 1).getTime() / 1000];
+	}
+	function dayOf(t) {
+		var x = new Date(t * 1000);
+		return x.getFullYear() * 10000 + (x.getMonth() + 1) * 100 + x.getDate();
+	}
+	// [[yyyymmdd, matches], ...] of a list, for the calendar
+	function dayCounts(list) {
+		var by = {};
+		list.forEach(function (m) { if (m[M.t]) { var k = dayOf(m[M.t]); by[k] = (by[k] || 0) + 1; } });
+		return Object.keys(by).map(function (k) { return [Number(k), by[k]]; });
+	}
+
 	function matches(list, f) {
+		var day = f.day ? dayRange(f.day) : null;
 		return list.filter(function (m) {
+			if (day && (m[M.t] < day[0] || m[M.t] >= day[1])) return false;
 			if (f.hero && m[M.hero] !== f.hero) return false;
 			if (f.mode === "ranked" && m[M.mode] !== 4) return false;
 			if (f.mode === "unranked" && !(m[M.mode] === 1 && m[M.gmode] === 1)) return false;
@@ -470,21 +489,43 @@ var DLRPV = (function () {
 
 	// ---------- teammates / opponents ----------
 
+	// Steam names (and friends) of players: asked STEAM_CHUNK at a time (each answer carries every one's friends: one
+	// for 60 players is ~0.5 MB, which a slow or cut line may never get whole), names kept (NAMES_KEY, NAMES_MAX, the
+	// newest) so a failed answer still has the ones known before
+	var STEAM_CHUNK = 15, NAMES_KEY = "dlr_pv_names", NAMES_MAX = 3000;
 	function steamProfiles(accs) {
 		if (!accs.length) return Promise.resolve({});
-		return api("/v1/players/steam?account_ids=" + accs.join(",")).then(function (list) {
-			var by = {};
-			(list || []).forEach(function (p) {
-				by[p.account_id] = { n: p.personaname || "", f: (p.friends || []).map(function (x) { return x.account_id; }) };
+		var known = (DLRPage.read(NAMES_KEY, 365 * DAYMS) || {}).m || {}, parts = [];
+		for (var i = 0; i < accs.length; i += STEAM_CHUNK) parts.push(accs.slice(i, i + STEAM_CHUNK));
+		return Promise.all(parts.map(function (ids) {
+			return api("/v1/players/steam?account_ids=" + ids.join(",")).then(function (list) { return list || []; }, function () { return []; });
+		})).then(function (lists) {
+			var by = {}, got = 0;
+			lists.forEach(function (list) {
+				list.forEach(function (p) {
+					by[p.account_id] = { n: p.personaname || "", f: (p.friends || []).map(function (x) { return x.account_id; }) };
+					if (p.personaname) { known[p.account_id] = [p.personaname, Date.now()]; got++; }
+				});
 			});
+			accs.forEach(function (a) { if (!by[a] && known[a]) by[a] = { n: known[a][0], f: [], old: 1 }; });
+			if (got) {
+				var keys = Object.keys(known);
+				if (keys.length > NAMES_MAX) keys.sort(function (a, b) { return known[a][1] - known[b][1]; }).slice(0, keys.length - NAMES_MAX).forEach(function (k) { delete known[k]; });
+				DLRPage.write(NAMES_KEY, { m: known });
+			}
 			return by;
-		}, function () { return {}; });
+		});
 	}
 
 	// { r: [[account, name, games, wins, last played together, friend]], s: [party games, party wins, solo games, solo
 	// wins] (side "with") , b: [name, games, wins] best duo }
 	function mates(acc, side, season) {
-		return cached("dlr_pv_mt_" + acc + "_" + side + "_" + season, 15 * MIN, function () { return loadMates(acc, side, season); });
+		var key = "dlr_pv_mt_" + acc + "_" + side + "_" + season;
+		return cached(key, 15 * MIN, function () { return loadMates(acc, side, season); }).then(function (d) {
+			// (names missing: the next look asks again rather than keep account numbers for a quarter of an hour)
+			if (d && d.miss) try { localStorage.setItem(key, JSON.stringify({ d: d, at: Date.now() - 14 * MIN })); } catch (x) { }
+			return d;
+		});
 	}
 
 	function loadMates(acc, side, season) {
@@ -505,7 +546,7 @@ var DLRPV = (function () {
 					x[3].forEach(function (id) { if (startOf[id] > t) t = startOf[id]; });
 					return [x[0], ((by[x[0]] || {}).n || String(x[0])).slice(0, 32), x[1], x[2], t, friends[x[0]] ? 1 : 0];
 				});
-				var out = { r: rows };
+				var out = { r: rows, miss: list.some(function (x) { return !(by[x[0]] && by[x[0]].n); }) ? 1 : 0 };
 				if (side === "with") {
 					var r0 = seasonRange(season), party = {};
 					list.forEach(function (x) { x[3].forEach(function (id) { party[id] = 1; }); });
@@ -573,5 +614,5 @@ var DLRPV = (function () {
 
 	return { M: M, history: history, rankHistory: rankHistory, matches: matches, streaks: streaks, row: row, summary: summary, builds: builds, heroStats: heroStats,
 		stats: stats, mates: mates, counted: counted, keepHistory: keepHistory, readKept: readKept,
-		keepNatives: keepNatives, natives: natives, withNatives: withNatives };
+		keepNatives: keepNatives, natives: natives, withNatives: withNatives, dayCounts: dayCounts };
 })();
