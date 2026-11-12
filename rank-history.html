@@ -5,7 +5,7 @@ svg { display: block; }
 </style>
 <body>
 <script src="shared.js?v=da2c788e39"></script>
-<script src="pvdata.js?v=cc55e3cab9"></script>
+<script src="pvdata.js?v=79304f6043"></script>
 <script>
 // Rank history chart of the profile page: rank-history.html#acc=<account>&p=<title prefix>&q=<request id>
 //   &n=<the 12 tier names, in the game's language>&pl=<"points" in the game's language>
@@ -13,7 +13,6 @@ svg { display: block; }
 //   &fin=<"end of season" in the game's language>
 //   &wide=1: the line up to the right edge, no "rank now" block on the right (the profile's showcase has its own)
 //   &col / &cw / &cl=<hex colours of the line, of wins, of losses>
-//   &ws / &ls=<first point>-<last point>-<length>: the season's longest win / loss streak, lit with &wl / &ll as titles
 // One ranked season's history, one point per match; the line follows the rank points, not only the badges. The
 // title tells the game which seasons have matches (ss) and which one shows (s), for its season buttons.
 var token = 0, WIDE = false;
@@ -75,7 +74,7 @@ function date(t) {
 
 // points beyond this many are thinned out for the line (every one still counts for the range); the last one stays
 var MAX_LINE_POINTS = 400;
-var ACCENT = "#3fbf7f", MUTED = "#c4c9d0", WIN = "#61E761", LOSS = "#E05555", STREAKS = [];
+var ACCENT = "#3fbf7f", MUTED = "#c4c9d0", WIN = "#61E761", LOSS = "#E05555";
 function hex(v, d) { return /^[0-9a-fA-F]{6}$/.test(v || "") ? "#" + v : d; }
 
 function draw(series, now, names, pointsWord, finWord) {
@@ -112,28 +111,9 @@ function draw(series, now, names, pointsWord, finWord) {
 		if (bandH >= 13) s.push('<text x="38" y="' + r2(mid + 4.5) + '" fill="' + DLRPage.lift(DLRPage.COLORS[t]) + '" font-size="12" font-weight="800" letter-spacing="1">' + DLRPage.esc((names[t] || "").toUpperCase()) + "</text>");
 	}
 	s.push('<line x1="' + left + '" x2="' + (left + plotW) + '" y1="' + plotBottom + '" y2="' + plotBottom + '" stroke="#fff" stroke-opacity="0.22"/>');
-	// the longest streaks: a band in their colour over their matches, its title on top
-	var half = N > 1 ? (plotW - 2 * pad) / (N - 1) / 2 : 6;
-	STREAKS.forEach(function (st) {
-		if (st.i0 < 0 || st.i1 >= N || st.i1 < st.i0) return;
-		var x0 = Math.max(left, X(st.i0) - half), x1 = Math.min(left + plotW, X(st.i1) + half);
-		s.push('<rect x="' + r2(x0) + '" y="' + top + '" width="' + r2(Math.max(2, x1 - x0)) + '" height="' + plotH + '" fill="' + st.c + '" fill-opacity="0.14"/>');
-		s.push('<line x1="' + r2(x0) + '" x2="' + r2(x1) + '" y1="' + (top + 1) + '" y2="' + (top + 1) + '" stroke="' + st.c + '" stroke-width="2"/>');
-		if (st.t) {
-			var right = x0 > left + plotW * 0.75;
-			s.push('<text x="' + r2(right ? x1 - 4 : x0 + 4) + '" y="' + (top + 15) + '" fill="' + st.c + '" font-size="11" font-weight="800" letter-spacing="1" text-anchor="' + (right ? "end" : "start") + '">' + DLRPage.esc(st.t) + "</text>");
-		}
-	});
 	var path = DLRPage.monotonePath(xs, ys);
 	if (n > 1) s.push('<path d="' + path + " L" + r2(xs[n - 1]) + "," + plotBottom + " L" + r2(xs[0]) + "," + plotBottom + ' Z" fill="url(#a)"/>');
 	s.push('<path d="' + path + '" fill="none" stroke="' + ACCENT + '" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>');
-	// the streaks' part of the line in their colour
-	STREAKS.forEach(function (st) {
-		if (st.i0 < 0 || st.i1 >= N || st.i1 <= st.i0) return;
-		var sx = [], sy = [];
-		for (var i = st.i0; i <= st.i1; i++) { sx.push(X(i)); sy.push(y(series[i][1])); }
-		s.push('<path d="' + DLRPage.monotonePath(sx, sy) + '" fill="none" stroke="' + st.c + '" stroke-width="4" stroke-linejoin="round" stroke-linecap="round"/>');
-	});
 	if (n <= 40) for (var i = 0; i < n - 1; i++) s.push('<circle cx="' + r2(xs[i]) + '" cy="' + r2(ys[i]) + '" r="2.5" fill="#000" stroke="' + ACCENT + '" stroke-width="1.5"/>');
 	s.push('<circle cx="' + r2(xs[n - 1]) + '" cy="' + r2(ys[n - 1]) + '" r="9" fill="' + ACCENT + '" fill-opacity="0.2"/><circle cx="' + r2(xs[n - 1]) + '" cy="' + r2(ys[n - 1]) + '" r="5" fill="' + ACCENT + '"/>');
 	var labels = [0, n - 1];
@@ -165,11 +145,6 @@ function start() {
 	ACCENT = hex(P.get("col"), "#3fbf7f");
 	WIN = hex(P.get("cw"), "#61E761");
 	LOSS = hex(P.get("cl"), "#E05555");
-	STREAKS = [];
-	[["ws", "wl", WIN], ["ls", "ll", LOSS]].forEach(function (k) {
-		var r = String(P.get(k[0]) || "").split("-").map(Number);
-		if (r.length === 3 && r[2] >= 2) STREAKS.push({ i0: r[0], i1: r[1], c: k[2], t: P.get(k[1]) || "" });
-	});
 	document.body.innerHTML = "";
 	if (!/^\d+$/.test(acc)) return DLRPage.tell(P, "error");
 	Promise.all([load(acc), DLRPage.loadSeasons()]).then(function (r) {
