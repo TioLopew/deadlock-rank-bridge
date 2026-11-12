@@ -1,4 +1,4 @@
-<!doctype html><meta charset="utf-8"><title>Deadlock rank mod bridge</title><script src="shared.js?v=da2c788e39"></script><script src="playstyle.js?v=e114d79377"></script><script src="pvdata.js?v=79304f6043"></script><script>
+<!doctype html><meta charset="utf-8"><title>Deadlock rank mod bridge</title><script src="shared.js?v=da2c788e39"></script><script src="playstyle.js?v=e114d79377"></script><script src="pvdata.js?v=0fc1df80dc"></script><script>
 // Bridge page of the Deadlock rank mod, opened by the game in a hidden HTML panel (the game's HTML panels only open
 // http(s) pages, so it is hosted on GitHub Pages):
 //   bridge.html#job=<profile|ranks|allbadges|party>&p=<title prefix>&q=<request id>&acc=<account>|accs=<accounts>|f=..&e=..
@@ -554,7 +554,16 @@ var jobs = {
 		if (part === "mh") {
 			var f = { hero: Number(P.get("hero")) || 0, mode: P.get("mode") || "", res: P.get("res") || "", season: Number(P.get("season")) || 0 };
 			var from = Math.max(0, Number(P.get("from")) || 0), n = Math.max(1, Math.min(60, Number(P.get("n")) || 30));
-			DLRPV.history(acc, P.get("wait") === "1").then(function (h) {
+			// the game's own matches the mod sends (nat): kept, and in the history wherever deadlock-api lacks them; with
+			// deadlock-api out of reach, the history is those alone
+			var nat = null;
+			try { nat = JSON.parse(P.get("nat") || "null"); } catch (x) { nat = null; }
+			if (nat) DLRPV.keepNatives(acc, nat);
+			DLRPV.history(acc, P.get("wait") === "1").catch(function (e) {
+				if (DLRPV.natives(acc).length) return { d: [], stale: false, failed: true };
+				throw e;
+			}).then(function (h) {
+				h = { d: DLRPV.withNatives(acc, h.d), stale: h.stale };
 				var sel = DLRPV.matches(h.d, f), st = DLRPV.streaks(h.d), saved = stored(acc);
 				job.send({ k: "sum", d: DLRPV.summary(h.d, saved && saved.g, f), stale: h.stale ? 1 : 0, total: sel.length }, 0);
 				job.sendList("rows", sel.slice(from, from + n).map(function (m) { return DLRPV.row(m, st); }), 1, { from: from, total: sel.length });
