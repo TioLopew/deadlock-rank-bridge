@@ -1,4 +1,4 @@
-<!doctype html><meta charset="utf-8"><title>Deadlock rank mod bridge</title><script src="shared.js?v=da2c788e39"></script><script src="playstyle.js?v=e114d79377"></script><script src="pvdata.js?v=8f25fec364"></script><script>
+<!doctype html><meta charset="utf-8"><title>Deadlock rank mod bridge</title><script src="shared.js?v=da2c788e39"></script><script src="playstyle.js?v=e114d79377"></script><script src="pvdata.js?v=cc55e3cab9"></script><script>
 // Bridge page of the Deadlock rank mod, opened by the game in a hidden HTML panel (the game's HTML panels only open
 // http(s) pages, so it is hosted on GitHub Pages):
 //   bridge.html#job=<profile|ranks|allbadges|party>&p=<title prefix>&q=<request id>&acc=<account>|accs=<accounts>|f=..&e=..
@@ -572,7 +572,13 @@ var jobs = {
 				job.sendList("mates", r.r, 1);
 			}, fail);
 		} else if (part === "rh") {
-			DLRPV.rankHistory(acc, Number(P.get("season")) || 0).then(function (r) { job.send({ k: "rh", d: r }, 1); }, fail);
+			// (the chart points' matches go as a list of their own: they can be many)
+			DLRPV.rankHistory(acc, Number(P.get("season")) || 0).then(function (r) {
+				var hm = r.hm || [];
+				delete r.hm;
+				job.send({ k: "rh", d: r }, 0);
+				job.sendList("rhm", hm, 1);
+			}, fail);
 		} else if (part === "style") {
 			DLRStyle.load(acc).then(function (r) { job.send({ k: "style", d: r }, 1); }, fail);
 		} else if (part === "stats") {
@@ -610,7 +616,10 @@ var jobs = {
 		var c = {};
 		try { c = JSON.parse(job.P.get("c") || "{}") || {}; } catch (x) { c = {}; }
 		var kept = {};
-		Object.keys(c).forEach(function (k) { if (/^[a-z]{1,16}$/.test(k) && typeof c[k] === "boolean") kept[k] = c[k]; });
+		// (switches, and options: a short word)
+		Object.keys(c).forEach(function (k) {
+			if (/^[a-z]{1,16}$/.test(k) && (typeof c[k] === "boolean" || (typeof c[k] === "string" && /^[a-z0-9]{1,12}$/.test(c[k])))) kept[k] = c[k];
+		});
 		try { localStorage.setItem(CFG_KEY, JSON.stringify({ at: Date.now(), c: kept })); } catch (x) { }
 		job.send({ k: "cfg", d: kept }, 1);
 	},
