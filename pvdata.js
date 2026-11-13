@@ -17,8 +17,11 @@ var DLRPV = (function () {
 
 	// ---------- match history ----------
 	// compact, newest first: [match id, hero, start, duration s, match mode, game mode, win, k, d, a, souls, last hits,
-	// denies, rank gain, badge, placement match, demotion protection used, left the match]
-	var M = { id: 0, hero: 1, t: 2, dur: 3, mode: 4, gmode: 5, win: 6, k: 7, d: 8, a: 9, nw: 10, lh: 11, dn: 12, delta: 13, badge: 14, cal: 15, prot: 16, left: 17, nat: 18 };
+	// denies, rank gain, badge, placement match, demotion protection used, left the match, from the game only, low
+	// priority match (deadlock-api's low_pri_pool, or the game's word for it: the mode stays 1, unranked)]
+	var M = { id: 0, hero: 1, t: 2, dur: 3, mode: 4, gmode: 5, win: 6, k: 7, d: 8, a: 9, nw: 10, lh: 11, dn: 12, delta: 13, badge: 14, cal: 15, prot: 16, left: 17, nat: 18, lp: 19 };
+	// the game's matches: mode 10 is a low priority match (dlr_common.js nativeMatch)
+	var NAT_LOWPRI = 10;
 	// Kept histories live on disk, in this browser's IndexedDB (DB_KEEP players, the ones not seen the longest go
 	// first: a few hundred kB each at most); a browser without it keeps them in localStorage as before (up to MH_KEEP
 	// within MH_BUDGET characters, the same entries profile.html keeps). A kept one shows at once (then the fresh one
@@ -35,7 +38,7 @@ var DLRPV = (function () {
 				m.player_team === m.match_result ? 1 : 0, m.player_kills || 0, m.player_deaths || 0, m.player_assists || 0,
 				m.net_worth || 0, m.last_hits || 0, m.denies || 0, typeof m.ranked_delta === "number" ? m.ranked_delta : null,
 				m.ranked_display_badge || 0, m.ranked_calibration_match || 0, m.ranked_used_demotion_protection ? 1 : 0,
-				m.abandoned_time_s > 0 ? 1 : 0]);
+				m.abandoned_time_s > 0 ? 1 : 0, 0, m.low_pri_pool ? 1 : 0]);
 		});
 		return out.sort(function (a, b) { return b[2] - a[2]; });
 	}
@@ -271,7 +274,7 @@ var DLRPV = (function () {
 		var nat = natives(acc);
 		if (!nat.length) return list;
 		// (start times by hero: the history's and the ones added, so one match the game showed twice is added once)
-		var ids = {}, starts = {}, add = [];
+		var ids = {}, starts = {}, add = [], byId = {};
 		function near(hero, t) {
 			var s = starts[hero] || [];
 			for (var i = 0; i < s.length; i++) if (Math.abs(s[i] - t) <= 120) return true;
@@ -279,13 +282,20 @@ var DLRPV = (function () {
 		}
 		list.forEach(function (m) {
 			ids[m[M.id]] = 1;
+			byId[m[M.id]] = m;
 			(starts[m[M.hero]] || (starts[m[M.hero]] = [])).push(m[M.t]);
 		});
 		nat.forEach(function (n) {
-			if ((n[0] && ids[n[0]]) || near(n[1], n[2])) return;
+			var lp = n[4] === NAT_LOWPRI ? 1 : 0;
+			// (deadlock-api has it: the game's word that it was a low priority match is kept on its row)
+			if (n[0] && ids[n[0]]) {
+				if (lp && byId[n[0]]) byId[n[0]][M.lp] = 1;
+				return;
+			}
+			if (near(n[1], n[2])) return;
 			if (n[0]) ids[n[0]] = 1;
 			(starts[n[1]] || (starts[n[1]] = [])).push(n[2]);
-			add.push([n[0] || -n[2], n[1], n[2], n[3], n[4], n[5], n[6], null, null, null, n[7] || 0, 0, 0, null, 0, 0, 0, 0, 1]);
+			add.push([n[0] || -n[2], n[1], n[2], n[3], lp ? 1 : n[4], n[5], n[6], null, null, null, n[7] || 0, 0, 0, null, 0, 0, 0, 0, 1, lp]);
 		});
 		if (!add.length) return list;
 		return list.concat(add).sort(function (a, b) { return b[M.t] - a[M.t]; });
@@ -296,9 +306,11 @@ var DLRPV = (function () {
 		return m[M.gmode] === 1 && (m[M.mode] === 1 || m[M.mode] === 4 || m[M.mode] === 8);
 	}
 
-	// what a row says its mode is: 4 ranked, 1 unranked, 2 lobby, 3 bots, 7 hero labs, 8 placement, 9 street brawl, 0 other
+	// what a row says its mode is: 4 ranked, 1 unranked, 2 lobby, 3 bots, 7 hero labs, 8 placement, 9 street brawl,
+	// 10 low priority (an unranked match in the low priority queue), 0 other
 	function modeCode(m) {
 		if (m[M.gmode] === 4) return 9;
+		if (m[M.lp] && m[M.mode] === 1) return 10;
 		return [1, 2, 3, 4, 7, 8].indexOf(m[M.mode]) >= 0 ? m[M.mode] : 0;
 	}
 
