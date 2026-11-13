@@ -569,7 +569,10 @@ var jobs = {
 				var sel = DLRPV.matches(h.d, f), st = DLRPV.streaks(h.d), saved = stored(acc);
 				// (the calendar's days: the matches of the same filters on any day)
 				var dc = DLRPV.dayCounts(f.day ? DLRPV.matches(h.d, { hero: f.hero, mode: f.mode, res: f.res, season: f.season }) : sel);
-				job.send({ k: "sum", d: DLRPV.summary(h.d, saved && saved.g, f), stale: h.stale ? 1 : 0, total: sel.length, dc: dc }, 0);
+				// (the calendar's days go after it in messages of their own: with them in it, a long history made it
+				// longer than a page title carries, and the game never saw it)
+				job.send({ k: "sum", d: DLRPV.summary(h.d, saved && saved.g, f), stale: h.stale ? 1 : 0, total: sel.length, dcs: 1 }, 0);
+				job.sendList("dc", dc, 0, { n: dc.length });
 				job.sendList("rows", sel.slice(from, from + n).map(function (m) { return DLRPV.row(m, st); }), 1, { from: from, total: sel.length });
 			}, fail);
 		} else if (part === "b") {
